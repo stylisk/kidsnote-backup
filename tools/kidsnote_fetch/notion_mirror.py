@@ -288,10 +288,21 @@ class MediaBackupError(RuntimeError):
 
 
 class _DriveFallbackUploader:
-    """Small Google Drive uploader used only when Notion file_uploads cannot hold a file."""
+    """Google Drive uploader used only when Notion file_uploads cannot hold a file."""
 
-    def __init__(self, *, folder_id: str, service_account_info: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        *,
+        folder_id: str,
+        oauth_client_id: str | None = None,
+        oauth_client_secret: str | None = None,
+        oauth_refresh_token: str | None = None,
+        service_account_info: dict[str, Any] | None = None,
+    ) -> None:
         self.folder_id = folder_id
+        self.oauth_client_id = oauth_client_id
+        self.oauth_client_secret = oauth_client_secret
+        self.oauth_refresh_token = oauth_refresh_token
         self.service_account_info = service_account_info
         self._service: Any = None
 
@@ -314,21 +325,38 @@ class _DriveFallbackUploader:
         import os
 
         folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+        oauth_client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+        oauth_client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+        oauth_refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
         raw_info = (
             os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
             or os.environ.get("GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON", "")
         )
-        if not folder_id or not raw_info.strip():
+        if not folder_id:
+            return None
+        if oauth_client_id and oauth_client_secret and oauth_refresh_token:
+            return cls(
+                folder_id=folder_id,
+                oauth_client_id=oauth_client_id,
+                oauth_client_secret=oauth_client_secret,
+                oauth_refresh_token=oauth_refresh_token,
+            )
+        if not raw_info.strip():
             return None
         info = cls._load_service_account(raw_info)
         if not info:
             return None
+        _LOGGER.warning(
+            "Google Drive fallback is using legacy service-account credentials. "
+            "Service accounts have no My Drive storage quota; use OAuth secrets or a Shared Drive."
+        )
         return cls(folder_id=folder_id, service_account_info=info)
 
     def _client(self) -> Any:
         if self._service is not None:
             return self._service
         try:
+            from google.oauth2.credentials import Credentials
             from google.oauth2 import service_account
             from googleapiclient.discovery import build
         except ImportError as e:
@@ -337,10 +365,23 @@ class _DriveFallbackUploader:
                 "Install google-api-python-client and google-auth."
             ) from e
 
-        creds = service_account.Credentials.from_service_account_info(
-            self.service_account_info,
-            scopes=["https://www.googleapis.com/auth/drive.file"],
-        )
+        scopes = ["https://www.googleapis.com/auth/drive.file"]
+        if self.oauth_client_id and self.oauth_client_secret and self.oauth_refresh_token:
+            creds = Credentials(
+                token=None,
+                refresh_token=self.oauth_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self.oauth_client_id,
+                client_secret=self.oauth_client_secret,
+                scopes=scopes,
+            )
+        elif self.service_account_info:
+            creds = service_account.Credentials.from_service_account_info(
+                self.service_account_info,
+                scopes=scopes,
+            )
+        else:
+            raise RuntimeError("Google Drive fallback credentials are incomplete")
         self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
         return self._service
 
@@ -731,12 +772,33 @@ class NotionMirror:
         """Map a filename suffix to an HTTP-friendly MIME type."""
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
         return {
+            # Video
             "mp4": "video/mp4",
             "mov": "video/quicktime",
+            "qt": "video/quicktime",
             "m4v": "video/mp4",
             "webm": "video/webm",
             "avi": "video/x-msvideo",
             "mkv": "video/x-matroska",
+            "3gp": "video/3gpp",
+            "3g2": "video/3gpp2",
+            "wmv": "video/x-ms-wmv",
+            "mpeg": "video/mpeg",
+            "mpg": "video/mpeg",
+            # Audio
+            "mp3": "audio/mpeg",
+            "m4a": "audio/mp4",
+            "aac": "audio/aac",
+            "wav": "audio/wav",
+            "wave": "audio/wav",
+            "ogg": "audio/ogg",
+            "oga": "audio/ogg",
+            "opus": "audio/ogg",
+            "flac": "audio/flac",
+            "amr": "audio/amr",
+            "weba": "audio/webm",
+            "wma": "audio/x-ms-wma",
+            # Images
             "jpg": "image/jpeg",
             "jpeg": "image/jpeg",
             "png": "image/png",
@@ -744,6 +806,11 @@ class NotionMirror:
             "webp": "image/webp",
             "heic": "image/heic",
             "heif": "image/heif",
+            "tif": "image/tiff",
+            "tiff": "image/tiff",
+            "bmp": "image/bmp",
+            "svg": "image/svg+xml",
+            # Documents / archives
             "pdf": "application/pdf",
             "doc": "application/msword",
             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -751,8 +818,14 @@ class NotionMirror:
             "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "ppt": "application/vnd.ms-powerpoint",
             "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "csv": "text/csv",
             "txt": "text/plain",
+            "rtf": "application/rtf",
+            "hwp": "application/x-hwp",
+            "hwpx": "application/vnd.hancom.hwpx",
             "zip": "application/zip",
+            "7z": "application/x-7z-compressed",
+            "rar": "application/vnd.rar",
         }.get(ext, "application/octet-stream")
 
     def _upload_one_blob(
@@ -800,7 +873,10 @@ class NotionMirror:
             upload_url = handle["upload_url"]
             file_upload_id = handle["id"]
         except Exception as e:
-            _LOGGER.warning("file_uploads create failed for %s %s: %s", kind, filename, e)
+            _LOGGER.warning(
+                "file_uploads create failed for %s %s: %s%s",
+                kind, filename, e, self._response_hint(locals().get("r")),
+            )
             return self._upload_to_drive_fallback(raw, filename, mime, kind=kind)
 
         try:
@@ -815,10 +891,28 @@ class NotionMirror:
             )
             r.raise_for_status()
         except Exception as e:
-            _LOGGER.warning("%s upload PUT failed for %s: %s", kind, filename, e)
+            _LOGGER.warning(
+                "%s upload PUT failed for %s: %s%s",
+                kind, filename, e, self._response_hint(locals().get("r")),
+            )
             return self._upload_to_drive_fallback(raw, filename, mime, kind=kind)
 
         return file_upload_id
+
+    @staticmethod
+    def _response_hint(response: Any) -> str:
+        if response is None:
+            return ""
+        text = getattr(response, "text", None)
+        if not text:
+            try:
+                text = json.dumps(response.json(), ensure_ascii=False)
+            except Exception:
+                text = ""
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        return f" | response={text[:500]}"
 
     def _upload_media_object(
         self,
@@ -954,26 +1048,14 @@ class NotionMirror:
         return f"{role} {name}".strip()
 
     @classmethod
-    def _weather_callout(cls, report: dict[str, Any]) -> dict[str, Any] | None:
+    def _weather_display(cls, report: dict[str, Any]) -> str | None:
         # Weather is the Kidsnote API field only. Parent posts can carry a
         # daycare auto-weather value, so omit it there to avoid false context.
         atype = (report.get("author") or {}).get("type") or ""
         w_code = report.get("weather") if atype != "parent" else None
         if not w_code:
             return None
-        w_display = WEATHER_KO.get(w_code, w_code)
-        return {
-            "object": "block",
-            "type": "callout",
-            "callout": {
-                "rich_text": [{
-                    "type": "text",
-                    "text": {"content": f"키즈노트 입력 날씨: {w_display}"},
-                }],
-                "icon": {"type": "emoji", "emoji": "🌤️"},
-                "color": "blue_background",
-            },
-        }
+        return WEATHER_KO.get(w_code, w_code)
 
     def _build_children(
         self,
@@ -984,10 +1066,6 @@ class NotionMirror:
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
 
-        weather = self._weather_callout(report)
-        if weather:
-            blocks.append(weather)
-
         # Metadata header (gray, single line) — author role depends on author.type
         meta_bits: list[str] = []
         author_text = self._author_display(report, emoji=True)
@@ -997,6 +1075,9 @@ class NotionMirror:
             meta_bits.append(f"{report['class_name']}")
         if report.get("date_written"):
             meta_bits.append(f"작성 {report['date_written']}")
+        weather = self._weather_display(report)
+        if weather:
+            meta_bits.append(weather)
         meta_bits.extend(self._life_record_bits(report))
         if meta_bits:
             blocks.append(self._para(" · ".join(meta_bits), color="gray"))

@@ -7,7 +7,7 @@
 [![Runs on GitHub Actions](https://img.shields.io/badge/runs%20on-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](#8단계-백업-실행)
 [![Notion](https://img.shields.io/badge/output-Notion-black?logo=notion)](#)
 
-## 현재 버전 요약 (2026-05-18)
+## 현재 버전 요약 (2026-05-19)
 
 이 저장소는 **로컬에서는 개발·커밋만 하고, 실제 백업 실행은 GitHub Actions 클라우드에서 수행**하는 구조입니다.
 
@@ -16,7 +16,7 @@
 - 기본 저장소: **Notion DB**
 - 대용량 fallback: **Google Drive 원본 보존** — Notion 5MB 한도 초과 또는 Notion 업로드 실패 시 같은 bytes/파일명으로 Drive에 올리고 Notion 페이지에 링크를 남김
 - 필수 GitHub Secrets: `KIDSNOTE_SESSION_COOKIE`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
-- 선택 GitHub Secrets: `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`
+- 선택 GitHub Secrets: `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`
 
 변경 내역과 구현 근거는 [docs/2026-05-18-cloud-run-drive-fallback.md](docs/2026-05-18-cloud-run-drive-fallback.md)에 기록되어 있습니다.
 
@@ -71,7 +71,7 @@
 ## 📋 목차
 
 - [이런 분께 추천드려요](#이런-분께-추천드려요)
-- [현재 버전 요약](#현재-버전-요약-2026-05-18)
+- [현재 버전 요약](#현재-버전-요약-2026-05-19)
 - [🎒 시작 전 준비물](#-시작-전-준비물-한눈에-보기)
 - [왜 필요한가요](#왜-이-도구가-필요한가요)
 - [📸 이렇게 백업됩니다 — 실제 스크린샷](#-이렇게-백업됩니다-실제-결과-스크린샷)
@@ -180,8 +180,7 @@
 ```
 [2026-03-31] 알림장: 👩‍🏫 봄 색깔을 찾고 블록 기차를 만든 날
 
-🌤️ 키즈노트 입력 날씨: ⛅ 흐림
-👩‍🏫 선생님 새싹2반 교사 · 새싹2반 · 작성 2026-03-31 · 🍽️ 식사 정해진 식단 · 💤 수면 1~1.5시간 ...
+👩‍🏫 선생님 새싹2반 교사 · 새싹2반 · 작성 2026-03-31 · ⛅ 흐림 · 🍽️ 식사 정해진 식단 · 💤 수면 1~1.5시간 ...
 
 [원본 본문 — 선생님이 작성한 그대로]
 오늘은 봄의 색깔을 찾아보는 놀이를 하였습니다. 하얀 봉투와 파란...
@@ -193,7 +192,7 @@
 
 - **제목 한줄요약**: Gemma4가 본문 작성자와 댓글 작성자를 구분해서 생성
 - **본문 내부 LLM callout 없음**: 요약, 자녀 일기, 부모 편지는 알림장 페이지 안에 넣지 않음
-- **🌤️ 키즈노트 입력 날씨**: Kidsnote 상세 API의 `weather` 필드만 사용, 부모 작성글 자동 날씨는 제외
+- **날씨**: Kidsnote 상세 API의 `weather` 필드만 사용해 작성일 뒤에 표시, 부모 작성글 자동 날씨는 제외
 - **원본 파일 보존**: Notion/Drive 업로드 전 압축, 리사이즈, EXIF/GPS 제거를 하지 않음
 
 3년치 알림장도 실행과 cron 재개를 통해 노션 DB 한 곳에 자동 정렬됩니다.
@@ -251,7 +250,7 @@
 | Python 의존성 | `requests`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트 |
 | Notion 업로드 | Notion `file_uploads` API 사용. 원본 bytes/파일명/EXIF를 변경하지 않고, DB `Files & media` 속성에도 원본 파일명으로 첨부 |
 | Google Drive fallback | 대용량 또는 Notion 업로드 실패 파일을 같은 bytes/파일명으로 Drive에 올리고 Notion에는 외부 링크로 삽입 |
-| 권한 설계 | GitHub에는 Google 계정 비밀번호를 넣지 않음. 서비스 계정 JSON만 Secret에 넣고, 해당 서비스 계정에 공유한 Drive 폴더만 접근 |
+| 권한 설계 | GitHub에는 Google 계정 비밀번호를 넣지 않음. OAuth refresh token으로 fallback 전용 Drive 폴더에 업로드 |
 
 관련 파일:
 
@@ -667,17 +666,20 @@ NOTION_TOKEN                  Updated now
 
 ### 7-4. 선택: 대용량 첨부파일용 Google Drive fallback
 
-노션 무료 플랜의 파일당 5MB 제한 때문에 큰 동영상/PDF는 기본적으로 건너뜁니다. 그 파일까지 링크로 남기고 싶을 때만 Google Drive 폴더와 서비스 계정을 준비한 뒤 아래 2개 시크릿을 추가합니다. 이미 이 2개를 등록했다면 바로 [8단계](#8단계-백업-실행)로 넘어가면 됩니다.
+노션 무료 플랜의 파일당 5MB 제한 때문에 큰 동영상/PDF는 기본적으로 노션에 직접 들어가지 못할 수 있습니다. 그 파일까지 링크로 남기고 싶을 때만 Google Drive 폴더와 OAuth 시크릿을 준비합니다.
 
 #### A. Google 쪽에서 준비할 것
 
 1. Google Cloud Console에서 프로젝트를 하나 만듭니다.
 2. **Google Drive API**를 활성화합니다.
-3. **서비스 계정**을 만듭니다.
-4. 서비스 계정의 **JSON 키**를 다운로드합니다.
+3. OAuth 동의 화면을 설정합니다.
+   - 개인 계정이면 테스트 사용자에 본인 Google 계정을 추가합니다.
+   - 장기 자동 실행용이면 앱 게시 상태가 테스트로 남아 있지 않게 설정하세요. 테스트 상태의 refresh token은 만료될 수 있습니다.
+4. **OAuth client ID**를 만듭니다.
+   - Application type: **Desktop app**
+   - JSON 파일을 다운로드합니다.
 5. Google Drive에 fallback 전용 폴더를 만듭니다.
-6. 그 Drive 폴더를 서비스 계정 JSON 안의 `client_email` 주소에 **편집자** 권한으로 공유합니다.
-7. Drive 폴더 URL의 마지막 ID 값을 복사합니다.
+6. Drive 폴더 URL의 마지막 ID 값을 복사합니다.
 
 Drive 폴더 URL 예시:
 
@@ -691,14 +693,25 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 1AbCdEfGhIjKlMnOpQrStUvWxYz
 ```
 
-> 중요: 서비스 계정은 내 Google Drive 전체를 보는 계정이 아닙니다. 위에서 공유한 Drive 폴더에만 접근할 수 있습니다.
+#### B. refresh token 만들기
 
-#### B. GitHub Secrets에 추가할 것
+로컬 컴퓨터에서 OAuth client JSON 파일을 받은 위치로 이동한 뒤:
+
+```bash
+python3 -m pip install -r tools/kidsnote_fetch/requirements.txt
+python3 tools/kidsnote_fetch/drive_oauth_setup.py ~/Downloads/client_secret_....json
+```
+
+브라우저가 열리면 fallback 업로드에 사용할 Google 계정으로 로그인하고 권한을 승인합니다. 스크립트가 아래 3개 Secret 값을 출력합니다.
+
+#### C. GitHub Secrets에 추가할 것
 
 | Name | Secret 값 |
 |---|---|
 | `GOOGLE_DRIVE_FOLDER_ID` | 업로드할 Google Drive 폴더 ID |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Cloud 서비스 계정 JSON 전체 또는 base64 인코딩 값 |
+| `GOOGLE_OAUTH_CLIENT_ID` | `drive_oauth_setup.py`가 출력한 client id |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | `drive_oauth_setup.py`가 출력한 client secret |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | `drive_oauth_setup.py`가 출력한 refresh token |
 
 등록 경로:
 
@@ -707,24 +720,11 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 3. **New repository secret**
 4. `GOOGLE_DRIVE_FOLDER_ID` 추가
 5. 다시 **New repository secret**
-6. `GOOGLE_SERVICE_ACCOUNT_JSON` 추가
+6. 나머지 OAuth secret 3개도 같은 방식으로 추가
 
-`GOOGLE_SERVICE_ACCOUNT_JSON`에는 다운로드한 `.json` 파일의 전체 내용을 그대로 붙여넣습니다.
+#### D. 작동 방식
 
-```json
-{
-  "type": "service_account",
-  "project_id": "...",
-  "private_key_id": "...",
-  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-  "client_email": "kidsnote-backup-drive@....iam.gserviceaccount.com",
-  "token_uri": "https://oauth2.googleapis.com/token"
-}
-```
-
-#### C. 작동 방식
-
-- `GOOGLE_DRIVE_FOLDER_ID`와 `GOOGLE_SERVICE_ACCOUNT_JSON`이 둘 다 있으면 Drive fallback이 켜집니다.
+- `GOOGLE_DRIVE_FOLDER_ID`와 OAuth secret 3개가 있으면 Drive fallback이 켜집니다.
 - 사진·동영상·PDF·엑셀 등 모든 파일은 키즈노트 `original` URL에서 받은 bytes와 원본 파일명을 그대로 사용합니다.
 - Notion 이미지 블록에서 직접 다운로드하면 Notion UI가 `img.jpg`처럼 이름을 바꿀 수 있으므로, 원본명 다운로드용으로 같은 파일을 DB의 `Files & media` 속성에도 첨부합니다.
 - `Files & media` 속성이 없으면 실행 중 자동 생성합니다.
@@ -732,7 +732,7 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 - Drive fallback 설정이 없거나 Drive 업로드가 실패하면 해당 파일을 조용히 건너뛰지 않고 실행을 실패시켜 다음 cron에서 재시도합니다.
 - fallback으로 Drive에 올라간 파일은 Notion에서 열 수 있도록 해당 파일에 `anyone reader` 권한이 붙습니다. 즉, **내 Drive 전체가 공개되는 것이 아니라 fallback으로 업로드된 개별 파일만 링크 열람 가능** 상태가 됩니다.
 
-5MB를 넘는 파일이 전혀 없고 Notion 업로드가 모두 성공하면 Drive 설정 없이도 동작합니다. 대용량까지 누락 없이 보존하려면 이 2개 Secret을 설정하세요.
+5MB를 넘는 파일이 전혀 없고 Notion 업로드가 모두 성공하면 Drive 설정 없이도 동작합니다. 대용량까지 누락 없이 보존하려면 위 4개 Secret을 설정하세요.
 
 ### ❓ 막혔다면
 
@@ -909,7 +909,7 @@ GitHub Actions는 종종 네트워크 이슈로 중간에 멈출 수 있어요. 
 ✅ **8단계 최종 성공 신호**:
 - Actions 페이지에서 워크플로 옆 동그라미가 **녹색 체크 ✅** + `succeeded`
 - 노션 DB로 돌아가서 보면 알림장들이 날짜순으로 들어가 있음
-- 페이지 클릭하면 최상단 날씨 callout(입력된 경우) + 작성자/생활기록 + 원본 본문 + 사진 + 첨부파일 + 댓글 정상 표시
+- 페이지 클릭하면 작성자/작성일/날씨/생활기록 + 원본 본문 + 사진 + 첨부파일 + 댓글 정상 표시
 - `Files & media` 속성에서 키즈노트 원본 파일명으로 백업된 파일 확인
 - DB 안에 자동 생성된 **7개 대시보드** 페이지도 보임 (📊 통계 / 📅 추억 / 🥗 영양 / 📖 성장 스토리 / 🌟 마일스톤 / 🌱 관심사 / 💌 선생님께)
 
@@ -1190,8 +1190,8 @@ UI는 노션이 가끔 바뀝니다. 메뉴 이름이 달라도 다음 기능을
 | `Database not connected to integration` | 4단계 빠뜨림 | 4단계 진행 |
 | 워크플로가 5분 만에 fail | 코드 import 에러 — fork가 오래된 코드일 가능성 | fork 페이지에서 `Sync fork` 클릭해서 최신 코드 가져오기 |
 | 노션 페이지에 사진이 안 보임 | 노션 무료 한도(스토리지) 초과, 5MB 이상 사진, 또는 Drive fallback 미설정 | 노션 스토리지와 Drive fallback Secret 확인. 사진은 압축하지 않고 원본 보존 |
-| `Google Drive fallback secret could not be parsed` | `GOOGLE_SERVICE_ACCOUNT_JSON` 값이 JSON 전체가 아니거나 붙여넣기 중 깨짐 | 서비스 계정 JSON 파일 전체를 다시 Secret에 붙여넣기 |
-| `Google Drive fallback upload failed ... File not found` | `GOOGLE_DRIVE_FOLDER_ID`가 틀렸거나 서비스 계정에 폴더 편집 권한이 없음 | Drive 폴더 ID 확인 + 폴더를 JSON의 `client_email`에 편집자로 공유 |
+| `Google Drive fallback upload failed ... File not found` | `GOOGLE_DRIVE_FOLDER_ID`가 틀렸거나 OAuth 승인 계정이 폴더에 접근 불가 | Drive 폴더 ID 확인 + OAuth 승인한 계정에서 폴더 접근 확인 |
+| `storageQuotaExceeded` / `Service Accounts do not have storage quota` | 예전 서비스 계정 방식 secret을 쓰고 있음 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`으로 교체 |
 | `OLLAMA_MODEL must be gemma4:e4b` | workflow 모델 값이 바뀜 | `.github/workflows/kidsnote-to-notion.yml`의 `OLLAMA_MODEL`을 `gemma4:e4b`로 복구 |
 | 모바일/태블릿에서 단계 진행 안 됨 | 모바일은 미지원 | 데스크톱/노트북 사용 |
 
@@ -1209,7 +1209,7 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/stylisk
 # 🛠️ 기술 스택 (개발자용)
 
 **런타임**
-- Python 3.12 (+ `requests`, `browser-cookie3`, `kiwipiepy`, `google-api-python-client`, `google-auth`)
+- Python 3.12 (+ `requests`, `browser-cookie3`, `kiwipiepy`, `google-api-python-client`, `google-auth`, `google-auth-oauthlib`)
 - GitHub Actions (ubuntu-latest, 단일 job 6h hard-cap)
 - Notion API `2022-06-28` (`file_uploads` + `databases` + 100-children chunked PATCH)
 - Google Drive API (선택): `drive.file` scope로 Notion 5MB 제한 또는 업로드 실패 시 외부 링크 fallback

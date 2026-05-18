@@ -13,6 +13,11 @@
 #   KIDSNOTE_SESSION_COOKIE   value of the `sessionid` cookie for kidsnote.com
 #   NOTION_TOKEN              internal integration token from notion.so/profile/integrations
 #   NOTION_DATABASE_ID        32-char hex id from your Notion DB URL
+# Optional Google Drive fallback secrets:
+#   GOOGLE_DRIVE_FOLDER_ID
+#   GOOGLE_OAUTH_CLIENT_ID
+#   GOOGLE_OAUTH_CLIENT_SECRET
+#   GOOGLE_OAUTH_REFRESH_TOKEN
 
 name: Kidsnote → Notion mirror
 
@@ -195,8 +200,10 @@ jobs:
           KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           # Tell notion_mirror.py where Ollama lives + which model to use
           OLLAMA_MODEL: ${{ env.OLLAMA_MODEL }}
           USE_OLLAMA: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}

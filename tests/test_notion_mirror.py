@@ -319,7 +319,7 @@ class NotionMirrorTests(unittest.TestCase):
         self.assertIn("body_head:", lines[1])
         self.assertIn("body_tail:", lines[2])
 
-    def test_weather_callout_is_first_and_parent_weather_is_omitted(self) -> None:
+    def test_weather_is_inline_after_date_and_parent_weather_is_omitted(self) -> None:
         mirror = make_mirror()
         teacher_report = {
             "id": 1,
@@ -339,21 +339,18 @@ class NotionMirrorTests(unittest.TestCase):
 
         blocks = mirror._build_children(teacher_report, [], [], [])
 
-        self.assertEqual(blocks[0]["type"], "callout")
-        self.assertEqual(
-            blocks[0]["callout"]["rich_text"][0]["text"]["content"],
-            "키즈노트 입력 날씨: ☀️ 맑음",
-        )
-        self.assertEqual(blocks[1]["type"], "paragraph")
-        meta = blocks[1]["paragraph"]["rich_text"][0]["text"]["content"]
+        self.assertEqual(blocks[0]["type"], "paragraph")
+        meta = blocks[0]["paragraph"]["rich_text"][0]["text"]["content"]
         self.assertIn("👩‍🏫 선생님 물빛1반 교사", meta)
+        self.assertIn("작성 2026-05-14 · ☀️ 맑음 · 🍽️ 식사 정해진 식단", meta)
         self.assertIn("🍽️ 식사 정해진 식단", meta)
 
         parent_report = dict(teacher_report)
         parent_report["author"] = {"type": "parent", "name": "정이담 아빠"}
         parent_report["author_name"] = "정이담 아빠"
         parent_blocks = mirror._build_children(parent_report, [], [], [])
-        self.assertNotEqual(parent_blocks[0]["type"], "callout")
+        parent_meta = parent_blocks[0]["paragraph"]["rich_text"][0]["text"]["content"]
+        self.assertNotIn("☀️ 맑음", parent_meta)
 
     def test_original_image_upload_uses_original_url_filename_and_bytes(self) -> None:
         raw = b"GPS-ORIGINAL-BYTES"
@@ -415,6 +412,39 @@ class NotionMirrorTests(unittest.TestCase):
         mirror_without_drive = make_mirror(max_image_bytes=3)
         with self.assertRaises(MediaBackupError):
             mirror_without_drive._upload_one_image(raw, "IMG_0001.JPG")
+
+    def test_drive_fallback_prefers_oauth_env(self) -> None:
+        with patch.dict(os.environ, {
+            "GOOGLE_DRIVE_FOLDER_ID": "folder-id",
+            "GOOGLE_OAUTH_CLIENT_ID": "client-id",
+            "GOOGLE_OAUTH_CLIENT_SECRET": "client-secret",
+            "GOOGLE_OAUTH_REFRESH_TOKEN": "refresh-token",
+            "GOOGLE_SERVICE_ACCOUNT_JSON": '{"client_email":"legacy@example.com"}',
+        }):
+            uploader = nm._DriveFallbackUploader.from_env()
+
+        self.assertIsNotNone(uploader)
+        assert uploader is not None
+        self.assertEqual(uploader.folder_id, "folder-id")
+        self.assertEqual(uploader.oauth_client_id, "client-id")
+        self.assertEqual(uploader.oauth_client_secret, "client-secret")
+        self.assertEqual(uploader.oauth_refresh_token, "refresh-token")
+        self.assertIsNone(uploader.service_account_info)
+
+    def test_audio_video_document_mime_mapping(self) -> None:
+        cases = {
+            "세계여러나라인사.mp3": "audio/mpeg",
+            "voice.m4a": "audio/mp4",
+            "movie.mov": "video/quicktime",
+            "movie.mp4": "video/mp4",
+            "notice.pdf": "application/pdf",
+            "sheet.xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "doc.hwpx": "application/vnd.hancom.hwpx",
+        }
+
+        for filename, expected in cases.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(NotionMirror._guess_mime(filename), expected)
 
     def test_files_property_auto_create_failure_is_loud(self) -> None:
         class FailingPatchSession(FakeNotionSession):
