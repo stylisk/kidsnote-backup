@@ -249,7 +249,7 @@
 | LLM 모델 | `gemma4:e4b`로 고정. workflow preflight에서 모델명과 cache key를 로그로 출력하고 다른 모델이면 실패 |
 | Ollama cache | `OLLAMA_CACHE_KEY=ollama-gemma4-e4b-v2` |
 | Python 의존성 | `requests`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트 |
-| Notion 업로드 | Notion `file_uploads` API 사용. 원본 bytes/파일명/EXIF를 변경하지 않음 |
+| Notion 업로드 | Notion `file_uploads` API 사용. 원본 bytes/파일명/EXIF를 변경하지 않고, DB `Files & media` 속성에도 원본 파일명으로 첨부 |
 | Google Drive fallback | 대용량 또는 Notion 업로드 실패 파일을 같은 bytes/파일명으로 Drive에 올리고 Notion에는 외부 링크로 삽입 |
 | 권한 설계 | GitHub에는 Google 계정 비밀번호를 넣지 않음. 서비스 계정 JSON만 Secret에 넣고, 해당 서비스 계정에 공유한 Drive 폴더만 접근 |
 
@@ -726,6 +726,8 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 
 - `GOOGLE_DRIVE_FOLDER_ID`와 `GOOGLE_SERVICE_ACCOUNT_JSON`이 둘 다 있으면 Drive fallback이 켜집니다.
 - 사진·동영상·PDF·엑셀 등 모든 파일은 키즈노트 `original` URL에서 받은 bytes와 원본 파일명을 그대로 사용합니다.
+- Notion 이미지 블록에서 직접 다운로드하면 Notion UI가 `img.jpg`처럼 이름을 바꿀 수 있으므로, 원본명 다운로드용으로 같은 파일을 DB의 `Files & media` 속성에도 첨부합니다.
+- `Files & media` 속성이 없으면 실행 중 자동 생성합니다.
 - 5MB를 넘거나 Notion 직접 업로드가 실패하면 같은 bytes/파일명으로 Drive fallback을 시도합니다.
 - Drive fallback 설정이 없거나 Drive 업로드가 실패하면 해당 파일을 조용히 건너뛰지 않고 실행을 실패시켜 다음 cron에서 재시도합니다.
 - fallback으로 Drive에 올라간 파일은 Notion에서 열 수 있도록 해당 파일에 `anyone reader` 권한이 붙습니다. 즉, **내 Drive 전체가 공개되는 것이 아니라 fallback으로 업로드된 개별 파일만 링크 열람 가능** 상태가 됩니다.
@@ -908,7 +910,7 @@ GitHub Actions는 종종 네트워크 이슈로 중간에 멈출 수 있어요. 
 - Actions 페이지에서 워크플로 옆 동그라미가 **녹색 체크 ✅** + `succeeded`
 - 노션 DB로 돌아가서 보면 알림장들이 날짜순으로 들어가 있음
 - 페이지 클릭하면 최상단 날씨 callout(입력된 경우) + 작성자/생활기록 + 원본 본문 + 사진 + 첨부파일 + 댓글 정상 표시
-- 사진 클릭하면 키즈노트 원본 파일명/bytes/metadata로 백업된 파일이 열림
+- `Files & media` 속성에서 키즈노트 원본 파일명으로 백업된 파일 확인
 - DB 안에 자동 생성된 **7개 대시보드** 페이지도 보임 (📊 통계 / 📅 추억 / 🥗 영양 / 📖 성장 스토리 / 🌟 마일스톤 / 🌱 관심사 / 💌 선생님께)
 
 ✅ **이제 끝**: 셋업 끝났습니다. 이 시점부터는 **사용자가 할 일이 없어요**.

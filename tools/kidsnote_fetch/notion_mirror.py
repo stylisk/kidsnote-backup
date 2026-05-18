@@ -272,6 +272,15 @@ DEFAULT_MAX_IMAGE_BYTES = 5_000_000   # Notion free-tier per-file cap.
 MAX_BLOCK_TEXT = 1900                 # Notion paragraph rich_text limit (2000).
 EXTERNAL_REF_PREFIX = "external:"
 FILENAME_KEYS = ("original_file_name", "file_name", "filename", "name")
+FILES_NAME_CANDIDATES = (
+    "Files & media",
+    "Files",
+    "Attachments",
+    "첨부파일",
+    "파일",
+    "사진 원본",
+)
+MAX_NOTION_FILE_NAME = 100
 
 
 class MediaBackupError(RuntimeError):
@@ -492,10 +501,11 @@ class NotionMirror:
         self._prop_title: str | None = None
         self._prop_report_id: str | None = None
         self._prop_date: str | None = None
+        self._prop_files: str | None = None
 
     def _resolve_schema(self) -> None:
-        """Discover the title / number / date property names from the live DB."""
-        if self._prop_report_id is not None:
+        """Discover required DB property names and create Files & media if needed."""
+        if self._prop_report_id is not None and self._prop_files is not None:
             return  # already resolved
         r = self.session.get(
             f"{NOTION_API}/databases/{self.database_id}",
@@ -527,6 +537,7 @@ class NotionMirror:
         self._prop_title = pick(TITLE_NAME_CANDIDATES, "title")
         self._prop_report_id = pick(REPORT_ID_NAME_CANDIDATES, "number")
         self._prop_date = pick(DATE_NAME_CANDIDATES, "date")
+        self._prop_files = pick(FILES_NAME_CANDIDATES, "files")
 
         if not self._prop_title:
             raise RuntimeError("DB has no title property (every Notion DB has one - check the DB).")
@@ -535,10 +546,36 @@ class NotionMirror:
                 "DB is missing a Number property for `Report ID`. "
                 "Add a Number column named 'Report ID' (or 'Report ID' / '리포트 ID')."
             )
+        if not self._prop_files:
+            self._prop_files = self._create_files_property(props)
         _LOGGER.info(
-            "Notion DB schema resolved: title=%r, number=%r, date=%r",
-            self._prop_title, self._prop_report_id, self._prop_date,
+            "Notion DB schema resolved: title=%r, number=%r, date=%r, files=%r",
+            self._prop_title, self._prop_report_id, self._prop_date, self._prop_files,
         )
+
+    def _create_files_property(self, props: dict[str, Any]) -> str:
+        """Create a Notion Files & media property used to preserve filenames."""
+        prop_name = next((name for name in FILES_NAME_CANDIDATES if name not in props), None)
+        if prop_name is None:
+            base = "Files & media"
+            idx = 2
+            while f"{base} {idx}" in props:
+                idx += 1
+            prop_name = f"{base} {idx}"
+        try:
+            r = self.session.patch(
+                f"{NOTION_API}/databases/{self.database_id}",
+                headers=self._headers(),
+                json={"properties": {prop_name: {"files": {}}}},
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            raise RuntimeError(
+                f"DB is missing a Files & media property and automatic creation failed: {e}"
+            ) from e
+        _LOGGER.info("Created Notion files property %r for original media filenames", prop_name)
+        return prop_name
 
     # ----------------------------------------------------------- internals
 
@@ -751,7 +788,11 @@ class NotionMirror:
             r = self.session.post(
                 f"{NOTION_API}/file_uploads",
                 headers=self._headers(),
-                json={},
+                json={
+                    "mode": "single_part",
+                    "filename": filename,
+                    "content_type": mime,
+                },
                 timeout=self.timeout,
             )
             r.raise_for_status()
@@ -824,6 +865,29 @@ class NotionMirror:
             "type": "file_upload",
             "file_upload": {"id": ref},
         }
+
+    @staticmethod
+    def _notion_file_name(filename: str) -> str:
+        """Preserve source names, only shortening names too long for Notion UI."""
+        name = str(filename or "").strip() or "attachment"
+        if len(name) <= MAX_NOTION_FILE_NAME:
+            return name
+        dot = name.rfind(".")
+        if 0 < dot < len(name) - 1:
+            ext = name[dot:]
+            if len(ext) < 20 and MAX_NOTION_FILE_NAME > len(ext) + 3:
+                keep = MAX_NOTION_FILE_NAME - len(ext) - 3
+                return f"{name[:keep].rstrip()}...{ext}"
+        return name[:MAX_NOTION_FILE_NAME].rstrip()
+
+    @classmethod
+    def _files_property_value(cls, media_refs: list[tuple[str, str]]) -> dict[str, Any]:
+        files: list[dict[str, Any]] = []
+        for ref, filename in media_refs:
+            payload = cls._ref_payload(ref)
+            payload["name"] = cls._notion_file_name(filename)
+            files.append(payload)
+        return {"files": files}
 
     @classmethod
     def _image_block(cls, ref: str) -> dict[str, Any]:
@@ -914,8 +978,8 @@ class NotionMirror:
     def _build_children(
         self,
         report: dict[str, Any],
-        image_upload_ids: list[str],
-        video_upload_ids: list[str],
+        image_upload_ids: list[tuple[str, str]],
+        video_upload_ids: list[tuple[str, str]],
         file_upload_ids: list[tuple[str, str]],  # list of (id, filename)
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
@@ -950,7 +1014,7 @@ class NotionMirror:
                 "type": "heading_3",
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "사진"}}]},
             })
-            for fid in image_upload_ids:
+            for fid, _fname in image_upload_ids:
                 blocks.append(self._image_block(fid))
 
         # Videos (Notion file_upload or Google Drive fallback)
@@ -960,7 +1024,7 @@ class NotionMirror:
                 "type": "heading_3",
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "동영상"}}]},
             })
-            for fid in video_upload_ids:
+            for fid, _fname in video_upload_ids:
                 blocks.append(self._video_block(fid))
 
         # Generic file attachments (PDF, Excel, etc.)
@@ -1907,6 +1971,8 @@ class NotionMirror:
         self,
         menu: dict[str, Any],
         kidsnote_sess: requests.Session | None = None,
+        *,
+        media_refs: list[tuple[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Inline daily menu (heading + text + photo per meal) for embedding
         inside a report page.
@@ -1941,10 +2007,12 @@ class NotionMirror:
             if kidsnote_sess is None or not isinstance(img, dict):
                 continue
             try:
-                fid, _filename = self._upload_media_object(
+                fid, filename = self._upload_media_object(
                     kidsnote_sess, img, kind="image", timeout=120,
                 )
                 out.append(self._image_block(fid))
+                if media_refs is not None:
+                    media_refs.append((fid, filename))
             except MediaBackupError:
                 raise
         return out
@@ -2067,19 +2135,19 @@ class NotionMirror:
         title = f"[{date_str}] 알림장: {author_title} {oneliner}"
 
         # Upload photos first so we can drop image blocks into the page body.
-        image_upload_ids: list[str] = []
+        image_upload_ids: list[tuple[str, str]] = []
         images_failed = 0
         for img in report.get("attached_images") or []:
             try:
-                fid, _filename = self._upload_media_object(
+                fid, filename = self._upload_media_object(
                     kidsnote_sess, img, kind="image", timeout=120,
                 )
-                image_upload_ids.append(fid)
+                image_upload_ids.append((fid, filename))
             except MediaBackupError:
                 raise
 
         # Videos: kidsnote stores it as a single object (or None / list of 1).
-        video_upload_ids: list[str] = []
+        video_upload_ids: list[tuple[str, str]] = []
         videos_failed = 0
         video_objs: list[dict[str, Any]] = []
         for k in ("attached_video", "video", "attached_videos"):
@@ -2092,10 +2160,10 @@ class NotionMirror:
                 break
         for vobj in video_objs:
             try:
-                fid, _filename = self._upload_media_object(
+                fid, filename = self._upload_media_object(
                     kidsnote_sess, vobj, kind="video", timeout=180,
                 )
-                video_upload_ids.append(fid)
+                video_upload_ids.append((fid, filename))
             except MediaBackupError:
                 raise
 
@@ -2120,9 +2188,12 @@ class NotionMirror:
         # Attachment sections start at the first heading_3 named '사진'/'동영상'/'첨부 파일'.
         extras: list[dict[str, Any]] = []
         extras.extend(self._life_record_detail_blocks(report))
+        menu_media_refs: list[tuple[str, str]] = []
         if attached_menu:
             # Pass session so meal photos get downloaded + uploaded inline.
-            extras.extend(self._menu_summary_blocks(attached_menu, kidsnote_sess))
+            extras.extend(self._menu_summary_blocks(
+                attached_menu, kidsnote_sess, media_refs=menu_media_refs,
+            ))
         if extras:
             insert_idx = len(children)
             attachment_headings = {"사진", "동영상", "첨부 파일"}
@@ -2145,6 +2216,9 @@ class NotionMirror:
             self._prop_title: {"title": [{"text": {"content": title[:200]}}]},
             self._prop_report_id: {"number": report_id},
         }
+        media_refs = image_upload_ids + video_upload_ids + file_upload_ids + menu_media_refs
+        if media_refs and self._prop_files:
+            properties[self._prop_files] = self._files_property_value(media_refs)
         if date_str and self._prop_date:
             try:
                 d = datetime.fromisoformat(date_str[:10]).date().isoformat()
@@ -2198,19 +2272,19 @@ class NotionMirror:
         ``comment_kind``: URL segment for the comments endpoint (notices/albums).
         """
         # ---- Upload images ----
-        image_upload_ids: list[str] = []
+        image_upload_ids: list[tuple[str, str]] = []
         images_failed = 0
         for img in item.get("attached_images") or []:
             try:
-                fid, _filename = self._upload_media_object(
+                fid, filename = self._upload_media_object(
                     kidsnote_sess, img, kind="image", timeout=120,
                 )
-                image_upload_ids.append(fid)
+                image_upload_ids.append((fid, filename))
             except MediaBackupError:
                 raise
 
         # ---- Upload videos ----
-        video_upload_ids: list[str] = []
+        video_upload_ids: list[tuple[str, str]] = []
         videos_failed = 0
         video_objs: list[dict[str, Any]] = []
         for k in ("attached_video", "video", "attached_videos"):
@@ -2223,10 +2297,10 @@ class NotionMirror:
                 break
         for vobj in video_objs:
             try:
-                fid, _filename = self._upload_media_object(
+                fid, filename = self._upload_media_object(
                     kidsnote_sess, vobj, kind="video", timeout=180,
                 )
-                video_upload_ids.append(fid)
+                video_upload_ids.append((fid, filename))
             except MediaBackupError:
                 raise
 
@@ -2257,7 +2331,7 @@ class NotionMirror:
                 "type": "heading_3",
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "사진"}}]},
             })
-            for fid in image_upload_ids:
+            for fid, _fname in image_upload_ids:
                 blocks.append(self._image_block(fid))
         if video_upload_ids:
             blocks.append({
@@ -2265,7 +2339,7 @@ class NotionMirror:
                 "type": "heading_3",
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "동영상"}}]},
             })
-            for fid in video_upload_ids:
+            for fid, _fname in video_upload_ids:
                 blocks.append(self._video_block(fid))
         if file_upload_ids:
             blocks.append({
@@ -2288,6 +2362,9 @@ class NotionMirror:
             self._prop_title: {"title": [{"text": {"content": title[:200]}}]},
             self._prop_report_id: {"number": item_id},
         }
+        media_refs = image_upload_ids + video_upload_ids + file_upload_ids
+        if media_refs and self._prop_files:
+            properties[self._prop_files] = self._files_property_value(media_refs)
         if date_str and self._prop_date:
             try:
                 d = datetime.fromisoformat(date_str[:10]).date().isoformat()
@@ -2411,6 +2488,7 @@ class NotionMirror:
 
         # Build body + upload meal photos (each meal has at most 1 image).
         blocks: list[dict[str, Any]] = []
+        media_refs: list[tuple[str, str]] = []
         images_uploaded = 0
         images_failed = 0
 
@@ -2444,10 +2522,11 @@ class NotionMirror:
             # Photo (if present)
             if isinstance(meal_img, dict):
                 try:
-                    fid, _filename = self._upload_media_object(
+                    fid, filename = self._upload_media_object(
                         kidsnote_sess, meal_img, kind="image", timeout=120,
                     )
                     blocks.append(self._image_block(fid))
+                    media_refs.append((fid, filename))
                     images_uploaded += 1
                 except MediaBackupError:
                     images_failed += 1
@@ -2460,6 +2539,8 @@ class NotionMirror:
             self._prop_title: {"title": [{"text": {"content": title[:200]}}]},
             self._prop_report_id: {"number": menu_id},
         }
+        if media_refs and self._prop_files:
+            properties[self._prop_files] = self._files_property_value(media_refs)
         if date_str and self._prop_date:
             try:
                 d = datetime.fromisoformat(date_str[:10]).date().isoformat()

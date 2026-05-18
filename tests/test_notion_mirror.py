@@ -62,22 +62,36 @@ class FakeResponse:
 class FakeNotionSession:
     def __init__(self) -> None:
         self.pages: list[dict] = []
+        self.patches: list[dict] = []
+        self.upload_creates: list[dict] = []
         self.uploads: list[dict] = []
         self._upload_idx = 0
+        self.properties = {
+            "Name": {"type": "title"},
+            "Report ID": {"type": "number"},
+            "Date": {"type": "date"},
+        }
 
     def get(self, url: str, **kwargs) -> FakeResponse:
         if "/databases/" in url:
-            return FakeResponse({
-                "properties": {
-                    "Name": {"type": "title"},
-                    "Report ID": {"type": "number"},
-                    "Date": {"type": "date"},
-                }
-            })
+            return FakeResponse({"properties": self.properties})
         raise AssertionError(f"unexpected Notion GET {url}")
+
+    def patch(self, url: str, **kwargs) -> FakeResponse:
+        if "/databases/" in url:
+            payload = kwargs["json"]
+            self.patches.append(payload)
+            for name, meta in (payload.get("properties") or {}).items():
+                if "files" in meta:
+                    self.properties[name] = {"type": "files"}
+                else:
+                    self.properties[name] = meta
+            return FakeResponse({"properties": self.properties})
+        raise AssertionError(f"unexpected Notion PATCH {url}")
 
     def post(self, url: str, **kwargs) -> FakeResponse:
         if url.endswith("/file_uploads"):
+            self.upload_creates.append(kwargs["json"])
             self._upload_idx += 1
             return FakeResponse({
                 "id": f"upload-{self._upload_idx}",
@@ -366,9 +380,22 @@ class NotionMirrorTests(unittest.TestCase):
 
         self.assertIn(original_url, kidsnote.requested_urls)
         self.assertNotIn(resized_url, kidsnote.requested_urls)
+        self.assertEqual(mirror.session.upload_creates[0], {
+            "mode": "single_part",
+            "filename": "IMG_0001.JPG",
+            "content_type": "image/jpeg",
+        })
         self.assertEqual(mirror.session.uploads[0]["filename"], "IMG_0001.JPG")
         self.assertEqual(mirror.session.uploads[0]["raw"], raw)
         self.assertEqual(mirror.session.uploads[0]["mime"], "image/jpeg")
+        self.assertEqual(mirror.session.patches[0], {"properties": {"Files & media": {"files": {}}}})
+        page = mirror.session.pages[0]
+        media_prop = page["properties"]["Files & media"]["files"][0]
+        self.assertEqual(media_prop["name"], "IMG_0001.JPG")
+        self.assertEqual(media_prop["type"], "file_upload")
+        self.assertEqual(media_prop["file_upload"]["id"], "upload-1")
+        image_blocks = [b for b in page["children"] if b.get("type") == "image"]
+        self.assertEqual(image_blocks[0]["image"], {"type": "file_upload", "file_upload": {"id": "upload-1"}})
 
     def test_drive_fallback_preserves_bytes_and_filename_or_fails_loudly(self) -> None:
         raw = b"abcdef"
@@ -380,10 +407,66 @@ class NotionMirrorTests(unittest.TestCase):
 
         self.assertEqual(ref, "external:https://drive.example/IMG_0001.JPG")
         self.assertEqual(drive.calls, [(raw, "IMG_0001.JPG", "image/jpeg")])
+        files_value = NotionMirror._files_property_value([(ref, "IMG_0001.JPG")])
+        self.assertEqual(files_value["files"][0]["name"], "IMG_0001.JPG")
+        self.assertEqual(files_value["files"][0]["type"], "external")
+        self.assertEqual(files_value["files"][0]["external"]["url"], "https://drive.example/IMG_0001.JPG")
 
         mirror_without_drive = make_mirror(max_image_bytes=3)
         with self.assertRaises(MediaBackupError):
             mirror_without_drive._upload_one_image(raw, "IMG_0001.JPG")
+
+    def test_files_property_auto_create_failure_is_loud(self) -> None:
+        class FailingPatchSession(FakeNotionSession):
+            def patch(self, url: str, **kwargs) -> FakeResponse:
+                return FakeResponse({"message": "no permission"}, status_code=403)
+
+        with patch.object(nm._DriveFallbackUploader, "from_env", return_value=None):
+            mirror = NotionMirror(
+                token="notion-token",
+                database_id="database-id",
+                session=FailingPatchSession(),
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "automatic creation failed"):
+            mirror._resolve_schema()
+
+    def test_existing_files_property_is_reused(self) -> None:
+        session = FakeNotionSession()
+        session.properties["첨부파일"] = {"type": "files"}
+        with patch.object(nm._DriveFallbackUploader, "from_env", return_value=None):
+            mirror = NotionMirror(
+                token="notion-token",
+                database_id="database-id",
+                session=session,
+            )
+
+        mirror._resolve_schema()
+
+        self.assertEqual(mirror._prop_files, "첨부파일")
+        self.assertEqual(session.patches, [])
+
+    def test_menu_image_is_added_to_files_property_with_original_name(self) -> None:
+        raw = b"MENU-ORIGINAL-BYTES"
+        original_url = "https://cdn.kidsnote.test/original/MENU_20260514.JPG"
+        menu = {
+            "id": 500,
+            "date_menu": "2026-05-14",
+            "lunch": "밥\n국",
+            "lunch_img": {
+                "original": original_url,
+                "original_file_name": "MENU_20260514.JPG",
+            },
+        }
+
+        mirror = make_mirror()
+        kidsnote = FakeKidsnoteSession(media={original_url: raw})
+        mirror.publish_menu(menu, kidsnote)
+
+        page = mirror.session.pages[0]
+        media_prop = page["properties"]["Files & media"]["files"][0]
+        self.assertEqual(media_prop["name"], "MENU_20260514.JPG")
+        self.assertEqual(media_prop["file_upload"]["id"], "upload-1")
 
     def test_missing_original_url_is_a_media_backup_failure(self) -> None:
         with self.assertRaises(MediaBackupError):
