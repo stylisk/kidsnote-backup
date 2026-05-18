@@ -1125,6 +1125,7 @@ class NotionMirror:
         timeout: int = 120,
         final_labels: tuple[str, ...] = (),
         strip_meta: bool = True,
+        log_label: str | None = None,
     ) -> str | None:
         """Generic Ollama text-generation call. Returns None when Ollama
         isn't reachable or the response is empty / garbage. Output is
@@ -1132,6 +1133,8 @@ class NotionMirror:
         """
         cfg = _get_ollama()
         if cfg is None:
+            if log_label:
+                _LOGGER.warning("%s: Ollama is unavailable", log_label)
             return None
         try:
             r = requests.post(
@@ -1150,9 +1153,14 @@ class NotionMirror:
             r.raise_for_status()
             out = (r.json().get("response") or "").strip()
         except Exception as e:
-            logging.getLogger(__name__).debug("ollama call failed: %s", e)
+            if log_label:
+                _LOGGER.warning("%s: ollama call failed: %s", log_label, e)
+            else:
+                logging.getLogger(__name__).debug("ollama call failed: %s", e)
             return None
         if not out:
+            if log_label:
+                _LOGGER.warning("%s: ollama returned an empty response", log_label)
             return None
         # Drop wrapping ``"`` and leading dashes/asterisks
         out = out.strip().strip('"').strip("'").lstrip("- ").lstrip("* ").strip()
@@ -1176,12 +1184,56 @@ class NotionMirror:
             # If the LLM essentially answered in Chinese (>20% of chars),
             # the remaining Korean fragments aren't trustworthy — drop it.
             if ratio > 0.20:
+                if log_label:
+                    _LOGGER.warning(
+                        "%s: rejected LLM output after stripping %d CJK chars (%.0f%%)",
+                        log_label, cjk_removed, ratio * 100,
+                    )
                 return None
             # Collapse the multi-space gaps left behind.
             out = " ".join(out.split())
         if len(out) < 5:
+            if log_label:
+                _LOGGER.warning("%s: rejected too-short LLM output: %r", log_label, out)
             return None
         return out[:max_chars]
+
+    @staticmethod
+    def _clean_title_oneliner(text: str | None, *, max_chars: int = 90) -> str | None:
+        """Extract one usable title line from a local LLM response.
+
+        Gemma sometimes wraps the answer in markdown fences, a bare ``제목``
+        line, or a short lead-in. This keeps the first meaningful content line
+        instead of rejecting the whole report title.
+        """
+        if not text:
+            return None
+        lines: list[str] = []
+        for raw_line in str(text).splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            line = line.strip("`").strip()
+            if not line or line.lower() in {"text", "markdown", "plaintext"}:
+                continue
+            line = line.lstrip("-*•0123456789. \t").strip()
+            line = re.sub(r"^\*{1,3}(.+?)\*{1,3}$", r"\1", line).strip()
+            line = re.sub(r"^(제목|한줄요약|요약)\s*[:：]\s*", "", line).strip()
+            if line in {"제목", "한줄요약", "요약"}:
+                continue
+            line = re.sub(r"^제목은\s*", "", line).strip()
+            line = re.sub(r"^다음과\s+같습니다\s*[:：]?\s*", "", line).strip()
+            line = line.strip('"').strip("'").strip()
+            line = re.sub(r"\s+", " ", line)
+            if line:
+                lines.append(line)
+        if not lines:
+            return None
+        title = lines[0]
+        title = re.sub(r"[。.!?]+$", "", title).strip()
+        if len(title) < 3:
+            return None
+        return title[:max_chars].rstrip()
 
     @classmethod
     def _speaker_context(
@@ -1215,41 +1267,46 @@ class NotionMirror:
         context = cls._speaker_context(report, comments)
         if len(context.strip()) < 20:
             return None
-        prompt = (
-            "아래 키즈노트 알림장과 댓글을 읽고 Notion 페이지 제목에 넣을 "
-            "한줄요약을 한국어 45자 이내로 작성하세요.\n"
-            "규칙:\n"
-            "1. 본문 작성자와 댓글 작성자를 구분하세요.\n"
-            "2. 누가 말했는지, 그 사람이 무엇을 말했는지 정확히 반영하세요.\n"
-            "3. 댓글은 본문에 대한 답변입니다. 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요.\n"
-            "4. '원'은 어린이집/기관을 뜻할 수 있으니 사람 이름처럼 바꾸지 마세요.\n"
-            "5. 추측, 존댓말 메타 설명, 따옴표, 이모지 없이 제목 문장만 답하세요.\n\n"
+        full_prompt = (
+            "키즈노트 알림장 제목을 한국어 한 줄로만 작성하세요. "
+            "본문 작성자와 댓글 작성자를 구분하고, 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요. "
+            "'원'은 어린이집/기관일 수 있습니다. 이모지와 설명 없이 제목만 출력하세요.\n\n"
             "[예시]\n"
             "본문 작성자: 부모 정이담 아빠\n"
             "본문: 안녕하세요. 선생님! 오늘 이담이 하원은 제가 원으로 데리러 갈게요!\n"
             "댓글 1 작성자: 선생님 물빛1반 교사\n"
             "댓글 1: 네~ 놀이하며 기다리겠습니다😊\n"
             "제목: 아빠가 이담이를 어린이집으로 데리러 간다고 알림\n\n"
-            "[작성할 알림장]\n"
-            f"{context[:1800]}\n\n"
+            f"{context[:1200]}\n\n"
             "제목:"
         )
-        out = cls._ask_ollama(
-            prompt,
-            max_chars=90,
-            temperature=0.2,
-            num_predict=80,
-            timeout=90,
-            final_labels=("제목:", "한줄요약:", "요약:"),
+        short_prompt = (
+            "키즈노트 알림장을 한 줄 제목으로 요약하세요. "
+            "한국어만 쓰고, 제목 문장 하나만 출력하세요. "
+            "본문 작성자와 댓글 작성자를 혼동하지 마세요.\n\n"
+            f"{context[:900]}\n\n"
+            "제목:"
         )
-        if not out:
-            return None
-        first = out.split("\n", 1)[0].strip().lstrip("- ").lstrip("* ").strip()
-        first = re.sub(r"^(제목|한줄요약|요약)\s*[:：]\s*", "", first).strip()
-        first = first.strip('"').strip("'").strip()
-        if len(first) < 5 or len(first) > 120:
-            return None
-        return first
+        for attempt, prompt in enumerate((full_prompt, short_prompt), 1):
+            out = cls._ask_ollama(
+                prompt,
+                max_chars=160,
+                temperature=0.1,
+                num_predict=48,
+                timeout=120,
+                final_labels=("제목:", "한줄요약:", "요약:"),
+                strip_meta=False,
+                log_label=f"report id={report.get('id', '?')} title attempt {attempt}",
+            )
+            title = cls._clean_title_oneliner(out)
+            if title:
+                return title
+            if out:
+                _LOGGER.warning(
+                    "report id=%s title attempt %d produced unusable output: %r",
+                    report.get("id", "?"), attempt, out[:180],
+                )
+        return None
 
     @classmethod
     def _summarize_text_kiwi(cls, kiwi: Any, text: str, max_chars: int) -> str:

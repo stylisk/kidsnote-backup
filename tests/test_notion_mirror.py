@@ -275,6 +275,45 @@ class NotionMirrorTests(unittest.TestCase):
         with self.assertRaises(MediaBackupError):
             NotionMirror._original_url({"id": 9, "high_resize": "https://resized"}, kind="image")
 
+    def test_title_cleaner_accepts_wrapped_gemma_output(self) -> None:
+        raw = "제목\n```text\n아빠가 이담이를 어린이집으로 데리러 간다고 알림\n```"
+
+        self.assertEqual(
+            NotionMirror._clean_title_oneliner(raw),
+            "아빠가 이담이를 어린이집으로 데리러 간다고 알림",
+        )
+
+    def test_title_generation_retries_with_short_prompt(self) -> None:
+        reset_ollama_state()
+        calls: list[str] = []
+
+        def fake_ollama_get(url: str, **kwargs) -> FakeResponse:
+            return FakeResponse({"version": "test"})
+
+        def fake_ollama_post(url: str, **kwargs) -> FakeResponse:
+            calls.append(kwargs["json"]["prompt"])
+            if len(calls) == 1:
+                return FakeResponse({"response": "제목"})
+            return FakeResponse({"response": "선생님이 꽃 관찰 활동을 전함"})
+
+        report = {
+            "id": 99,
+            "date_written": "2026-05-14",
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "오늘은 꽃을 관찰하며 봄을 느껴보았습니다.",
+        }
+
+        with (
+            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:e4b"}),
+            patch.object(nm.requests, "get", side_effect=fake_ollama_get),
+            patch.object(nm.requests, "post", side_effect=fake_ollama_post),
+        ):
+            title = NotionMirror._title_oneliner(report, [])
+
+        self.assertEqual(title, "선생님이 꽃 관찰 활동을 전함")
+        self.assertEqual(len(calls), 2)
+
 
 class FetchResumeTests(unittest.TestCase):
     def test_publish_batch_stops_before_work_when_time_budget_is_low(self) -> None:
