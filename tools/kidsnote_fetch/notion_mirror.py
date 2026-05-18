@@ -90,6 +90,26 @@ def _get_ollama() -> dict[str, str] | None:
     return _OLLAMA_CONFIG
 
 _LOGGER = logging.getLogger(__name__)
+TITLE_FOCUS_VALUES = ("activity", "logistics", "health_sleep", "parent_request", "general")
+TITLE_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {
+            "type": "string",
+            "description": "Notion title oneliner in Korean, 55 characters or less.",
+        },
+        "evidence": {
+            "type": "string",
+            "description": "A short source phrase that supports the title.",
+        },
+        "focus": {
+            "type": "string",
+            "enum": list(TITLE_FOCUS_VALUES),
+        },
+    },
+    "required": ["title", "evidence", "focus"],
+    "additionalProperties": False,
+}
 
 
 # Two-syllable Korean surnames. Anything not in this list is treated as a
@@ -1279,6 +1299,93 @@ class NotionMirror:
         return out
 
     @classmethod
+    def _ask_ollama_chat_json(
+        cls,
+        prompt: str,
+        *,
+        log_label: str | None = None,
+        timeout: int = 240,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        cfg = _get_ollama()
+        if cfg is None:
+            if log_label:
+                _LOGGER.info("%s: Ollama is unavailable", log_label)
+            return None, {"error": "ollama_unavailable"}
+
+        metrics: dict[str, Any] = {}
+        try:
+            r = requests.post(
+                f"{cfg['host']}/api/chat",
+                json={
+                    "model": cfg["model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": "30m",
+                    "format": TITLE_JSON_SCHEMA,
+                    "options": {
+                        "temperature": 0.2,
+                        "top_p": 0.95,
+                        "top_k": 64,
+                        "num_predict": 96,
+                    },
+                },
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            if log_label:
+                _LOGGER.info("%s: ollama chat JSON call failed: %s", log_label, e)
+            else:
+                logging.getLogger(__name__).debug("ollama chat JSON call failed: %s", e)
+            return None, {"error": "ollama_chat_failed", "exception": str(e)}
+
+        message = payload.get("message") or {}
+        raw = (message.get("content") or "").strip()
+        metrics = {
+            "done_reason": payload.get("done_reason"),
+            "prompt_eval_count": payload.get("prompt_eval_count"),
+            "eval_count": payload.get("eval_count"),
+            "raw": raw,
+        }
+        if log_label:
+            _LOGGER.info(
+                "%s: ollama chat done_reason=%s prompt_eval_count=%s eval_count=%s",
+                log_label,
+                metrics.get("done_reason"),
+                metrics.get("prompt_eval_count"),
+                metrics.get("eval_count"),
+            )
+        if not raw:
+            metrics["error"] = "empty_response"
+            if log_label:
+                _LOGGER.info("%s: ollama chat returned an empty JSON response", log_label)
+            return None, metrics
+        data = cls._parse_json_object(raw)
+        if data is None:
+            metrics["error"] = "json_parse_failed"
+            if log_label:
+                _LOGGER.info("%s: ollama title JSON parse failed: %r", log_label, raw[:300])
+            return None, metrics
+        return data, metrics
+
+    @staticmethod
+    def _parse_json_object(raw: str) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start < 0 or end <= start:
+                return None
+            try:
+                parsed = json.loads(raw[start:end + 1])
+            except json.JSONDecodeError:
+                return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @classmethod
     def _clean_title_oneliner(cls, text: str | None, *, max_chars: int = 90) -> str | None:
         """Extract one usable title line from a local LLM response.
 
@@ -1404,6 +1511,96 @@ class NotionMirror:
                 lines.append(f"댓글 {idx}: {content}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _title_prompt(context: str) -> str:
+        return (
+            "너는 키즈노트 알림장 제목 생성기입니다. 아래 원문 전체를 읽고 "
+            "Notion 제목 뒤에 붙을 한국어 한줄요약을 만드세요.\n\n"
+            "본문과 댓글 원문 전체가 제공됩니다. 일부만 훑지 말고 끝까지 반영하세요.\n\n"
+            "출력 형식: 반드시 JSON 객체 하나만 출력하세요. Markdown, 설명, 코드블록 금지.\n"
+            "JSON 필드:\n"
+            '- "title": 55자 이내 한국어 제목\n'
+            '- "evidence": 제목 판단에 사용한 원문 핵심 구절\n'
+            '- "focus": activity, logistics, health_sleep, parent_request, general 중 하나\n\n'
+            "판단 규칙:\n"
+            "1. 본문 작성자와 댓글 작성자를 구분하세요.\n"
+            "2. 댓글은 오래된 순서대로 제공됩니다. 대화 흐름을 시간순으로 이해하세요.\n"
+            "3. 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요.\n"
+            "4. 차량, 등원, 하원, 준비물, 건강, 수면, 식사, 투약 같은 공지/요청/변경사항이 있으면 "
+            "일반 활동보다 우선하세요.\n"
+            "5. '원'은 사람 이름이 아니라 어린이집/기관일 수 있습니다. '원님'이라고 쓰지 마세요.\n"
+            "6. 작성자 이름/역할을 괄호로 반복하지 마세요.\n"
+            "7. 이모지, 따옴표, 제목:, 요약: 같은 메타 문구를 title에 넣지 마세요.\n\n"
+            "좋은 예:\n"
+            '{"title":"아빠가 이담이를 어린이집으로 데리러 간다고 알림",'
+            '"evidence":"오늘 이담이 하원은 제가 원으로 데리러 갈게요",'
+            '"focus":"logistics"}\n\n'
+            "[키즈노트 원문]\n"
+            f"{context}\n"
+        )
+
+    @classmethod
+    def _title_quality_flags(cls, title: str | None, *, evidence: str = "", focus: str = "") -> list[str]:
+        if not title:
+            return ["missing_title"]
+        flags: list[str] = []
+        if len(title) < 5:
+            flags.append("too_short")
+        if len(title) > 55:
+            flags.append("too_long")
+        if re.search(r"[\u4e00-\u9fff]", title):
+            flags.append("contains_hanja")
+        if "원님" in title:
+            flags.append("suspicious_won_nim")
+        if re.search(r"\s*[\(（][^()（）]*(부모|선생님|교사|원감|원장|작성자)[^()（）]*[\)）]\s*$", title):
+            flags.append("author_parenthetical_suffix")
+        if any(token in title for token in ("제목:", "한줄요약:", "요약:", "본문 작성자", "댓글 작성자")):
+            flags.append("meta_text")
+        if not evidence.strip():
+            flags.append("missing_evidence")
+        if focus not in TITLE_FOCUS_VALUES:
+            flags.append("invalid_focus")
+        return flags
+
+    @classmethod
+    def _title_details(
+        cls,
+        report: dict[str, Any],
+        comments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        context = cls._speaker_context(report, comments)
+        if len(context.strip()) < 20:
+            return {
+                "title": None,
+                "evidence": "",
+                "focus": "",
+                "flags": ["context_too_short"],
+                "metrics": {},
+            }
+        data, metrics = cls._ask_ollama_chat_json(
+            cls._title_prompt(context),
+            log_label=f"report id={report.get('id', '?')} title",
+        )
+        if data is None:
+            return {
+                "title": None,
+                "evidence": "",
+                "focus": "",
+                "flags": [str(metrics.get("error") or "json_parse_failed")],
+                "metrics": metrics,
+            }
+        title = cls._clean_title_oneliner(data.get("title"), max_chars=1000)
+        evidence = str(data.get("evidence") or "").strip()
+        focus = str(data.get("focus") or "").strip()
+        flags = cls._title_quality_flags(title, evidence=evidence, focus=focus)
+        return {
+            "title": title,
+            "evidence": evidence,
+            "focus": focus,
+            "flags": flags,
+            "metrics": metrics,
+        }
+
     @classmethod
     def _title_oneliner(
         cls,
@@ -1411,54 +1608,19 @@ class NotionMirror:
         comments: list[dict[str, Any]],
     ) -> str | None:
         """Speaker-aware one-line report title using Ollama/Gemma."""
-        context = cls._speaker_context(report, comments)
-        if len(context.strip()) < 20:
-            return None
-        full_prompt = (
-            "키즈노트 알림장 제목을 한국어 한 줄로만 작성하세요. "
-            "본문 작성자와 댓글 작성자를 구분하고, 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요. "
-            "댓글은 오래된 순서대로 제공되므로 대화 흐름을 시간순으로 이해하세요. "
-            "본문과 댓글 원문 전체가 제공됩니다. 뒤쪽의 공지/요청/변경사항도 놓치지 마세요. "
-            "'원'은 어린이집/기관일 수 있습니다. "
-            "작성자 이름/역할을 괄호로 반복하지 말고, 이모지와 설명 없이 제목만 출력하세요.\n\n"
-            "[예시]\n"
-            "본문 작성자: 부모 정이담 아빠\n"
-            "본문: 안녕하세요. 선생님! 오늘 이담이 하원은 제가 원으로 데리러 갈게요!\n"
-            "댓글 1 작성자: 선생님 물빛1반 교사\n"
-            "댓글 1: 네~ 놀이하며 기다리겠습니다😊\n"
-            "제목: 아빠가 이담이를 어린이집으로 데리러 간다고 알림\n\n"
-            f"{context}\n\n"
-            "제목:"
+        details = cls._title_details(report, comments)
+        title = details.get("title")
+        flags = details.get("flags") or []
+        if title and not flags:
+            return str(title)
+        metrics = dict(details.get("metrics") or {})
+        metrics.pop("raw", None)
+        _LOGGER.info(
+            "report id=%s: Gemma4 title rejected flags=%s metrics=%s",
+            report.get("id", "?"),
+            ",".join(str(flag) for flag in flags) or "unknown",
+            metrics,
         )
-        short_prompt = (
-            "키즈노트 알림장을 한 줄 제목으로 요약하세요. "
-            "한국어만 쓰고, 제목 문장 하나만 출력하세요. "
-            "본문 작성자와 댓글 작성자를 혼동하지 마세요. "
-            "댓글은 오래된 순서대로 제공됩니다. "
-            "본문과 댓글 원문 전체를 읽고 뒤쪽의 공지/요청도 확인하세요. "
-            "작성자 이름/역할을 괄호로 덧붙이지 마세요.\n\n"
-            f"{context}\n\n"
-            "제목:"
-        )
-        for attempt, prompt in enumerate((full_prompt, short_prompt), 1):
-            out = cls._ask_ollama(
-                prompt,
-                max_chars=160,
-                temperature=0.1,
-                num_predict=48,
-                timeout=120,
-                final_labels=("제목:", "한줄요약:", "요약:"),
-                strip_meta=False,
-                log_label=f"report id={report.get('id', '?')} title attempt {attempt}",
-            )
-            title = cls._clean_title_oneliner(out)
-            if title:
-                return title
-            if out:
-                _LOGGER.info(
-                    "report id=%s title attempt %d produced unusable output: %r",
-                    report.get("id", "?"), attempt, out[:180],
-                )
         return None
 
     @classmethod

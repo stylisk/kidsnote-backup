@@ -801,7 +801,12 @@ comments: 1 (oldest first)
 - comment 1 author: 선생님 물빛1반 교사
   comment 1: 네~ 놀이하며 기다리겠습니다😊
   comment 1_chars: 18
+prompt_eval_count: 321
+eval_count: 24
+done_reason: stop
 gemma_title: 아빠가 이담이를 어린이집으로 데리러 간다고 알림
+evidence: 오늘 이담이 하원은 제가 원으로 데리러 갈게요
+focus: logistics
 final_title: [2026-03-25] 알림장: 👨‍👩‍👧 아빠가 이담이를 어린이집으로 데리러 간다고 알림
 quality_flags: PASS
 ```
@@ -810,7 +815,7 @@ quality_flags: PASS
 
 본문이 길면 QA 로그는 사람이 확인하기 좋게 `body_head`와 `body_tail`을 보여주지만, Gemma 프롬프트에는 본문과 댓글 원문 전체를 전달합니다. `gemma_context_chars` 값으로 실제 전달한 전체 맥락 길이를 확인할 수 있습니다.
 
-`quality_flags`가 `PASS`가 아니거나 Gemma 제목이 비어 있으면 QA run은 실패 상태로 끝납니다. 그래도 각 샘플의 원문/댓글/제목 로그는 남기므로 어떤 제목이 문제인지 확인할 수 있습니다.
+`quality_flags`가 `PASS`가 아니거나 Gemma 제목이 비어 있으면 QA run은 실패 상태로 끝납니다. 이때 `gemma_error`에 실패 이유가 표시되고, Ollama가 JSON이 아닌 응답을 반환한 경우에는 `raw_response_head`로 응답 앞부분을 함께 보여줍니다. `prompt_eval_count`, `eval_count`, `done_reason`으로 Gemma가 실제로 컨텍스트를 처리했는지도 확인할 수 있습니다.
 
 > ⚠️ `title_source_chars`가 1 이상이면 Actions 로그에 알림장 원문 일부가 표시됩니다. 공개 저장소에서 민감한 원문을 남기기 싫다면 `0`으로 설정하세요. 이 경우 제목은 나오지만 원문은 숨깁니다.
 

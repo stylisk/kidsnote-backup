@@ -601,20 +601,8 @@ def _preview_text_lines(label: str, value: Any, *, max_chars: int) -> list[str]:
 
 
 def _title_quality_flags(title: str | None) -> list[str]:
-    if not title:
-        return ["gemma_failed"]
-    flags: list[str] = []
-    if re.search(r"[\u4e00-\u9fff]", title):
-        flags.append("contains_hanja")
-    if "원님" in title:
-        flags.append("suspicious_won_nim")
-    if re.search(r"\s*[\(（][^()（）]*(부모|선생님|교사|원감|원장|작성자)[^()（）]*[\)）]\s*$", title):
-        flags.append("author_parenthetical_suffix")
-    if any(token in title for token in ("제목:", "한줄요약:", "요약:", "본문 작성자", "댓글 작성자")):
-        flags.append("meta_text")
-    if len(title) > 90:
-        flags.append("too_long")
-    return flags
+    from notion_mirror import NotionMirror  # local module
+    return NotionMirror._title_quality_flags(title, evidence="test", focus="general")
 
 
 def _run_title_quality_check(
@@ -647,8 +635,9 @@ def _run_title_quality_check(
             if detail.get("num_comments")
             else []
         )
-        oneliner = NotionMirror._title_oneliner(detail, comments)
-        flags = _title_quality_flags(oneliner)
+        title_details = NotionMirror._title_details(detail, comments)
+        flags = list(title_details.get("flags") or [])
+        oneliner = title_details.get("title") if not flags else None
         if flags:
             failures += 1
         fallback = NotionMirror._fallback_title_oneliner(detail, comments) if not oneliner else None
@@ -684,7 +673,18 @@ def _run_title_quality_check(
                     print(line)
         else:
             print("comments: 0")
-        print(f"gemma_title: {oneliner or '(FAILED)'}")
+        metrics = title_details.get("metrics") or {}
+        print(f"prompt_eval_count: {metrics.get('prompt_eval_count')}")
+        print(f"eval_count: {metrics.get('eval_count')}")
+        print(f"done_reason: {metrics.get('done_reason')}")
+        print(f"gemma_title: {title_details.get('title') or '(FAILED)'}")
+        if flags:
+            print(f"gemma_error: {metrics.get('error') or ', '.join(flags)}")
+            raw = str(metrics.get("raw") or "").strip()
+            if raw:
+                print(f"raw_response_head: {_plain_text(raw, max_chars=300)}")
+        print(f"evidence: {title_details.get('evidence') or ''}")
+        print(f"focus: {title_details.get('focus') or ''}")
         if fallback:
             print(f"fallback_title: {fallback}")
         print(f"final_title: {final_title}")

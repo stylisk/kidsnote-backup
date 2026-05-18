@@ -4,6 +4,7 @@ import os
 import sys
 import types
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -145,12 +146,30 @@ class NotionMirrorTests(unittest.TestCase):
             return FakeResponse({"version": "test"})
 
         def fake_ollama_post(url: str, **kwargs) -> FakeResponse:
-            self.assertEqual(url, "http://ollama.test/api/generate")
+            self.assertEqual(url, "http://ollama.test/api/chat")
             body = kwargs["json"]
             self.assertEqual(body["model"], "gemma4:e4b")
-            self.assertIn("본문 작성자: 부모 정이담 아빠", body["prompt"])
-            self.assertIn("댓글 1 작성자: 선생님 물빛1반 교사", body["prompt"])
-            return FakeResponse({"response": "아빠가 이담이를 어린이집으로 데리러 간다고 알림"})
+            self.assertFalse(body["stream"])
+            self.assertFalse(body["think"])
+            self.assertEqual(body["keep_alive"], "30m")
+            self.assertEqual(body["options"]["temperature"], 0.2)
+            self.assertEqual(body["options"]["top_p"], 0.95)
+            self.assertEqual(body["options"]["top_k"], 64)
+            self.assertEqual(body["options"]["num_predict"], 96)
+            self.assertEqual(body["messages"][0]["role"], "user")
+            prompt = body["messages"][0]["content"]
+            self.assertIn("본문 작성자: 부모 정이담 아빠", prompt)
+            self.assertIn("댓글 1 작성자: 선생님 물빛1반 교사", prompt)
+            return FakeResponse({
+                "message": {"content": json.dumps({
+                    "title": "아빠가 이담이를 어린이집으로 데리러 간다고 알림",
+                    "evidence": "오늘 이담이 하원은 제가 원으로 데리러 갈게요",
+                    "focus": "logistics",
+                }, ensure_ascii=False)},
+                "done_reason": "stop",
+                "prompt_eval_count": 321,
+                "eval_count": 24,
+            })
 
         report = {
             "id": 1367868900,
@@ -380,18 +399,28 @@ class NotionMirrorTests(unittest.TestCase):
             "아빠가 이담이를 어린이집으로 데리러 간다고 알림",
         )
 
-    def test_title_generation_retries_with_short_prompt(self) -> None:
+    def test_title_generation_uses_chat_json_schema(self) -> None:
         reset_ollama_state()
-        calls: list[str] = []
 
         def fake_ollama_get(url: str, **kwargs) -> FakeResponse:
             return FakeResponse({"version": "test"})
 
         def fake_ollama_post(url: str, **kwargs) -> FakeResponse:
-            calls.append(kwargs["json"]["prompt"])
-            if len(calls) == 1:
-                return FakeResponse({"response": "제목"})
-            return FakeResponse({"response": "선생님이 꽃 관찰 활동을 전함"})
+            self.assertEqual(url, "http://ollama.test/api/chat")
+            body = kwargs["json"]
+            self.assertEqual(body["format"]["required"], ["title", "evidence", "focus"])
+            self.assertEqual(body["messages"][0]["role"], "user")
+            self.assertIn("본문과 댓글 원문 전체", body["messages"][0]["content"])
+            return FakeResponse({
+                "message": {"content": json.dumps({
+                    "title": "선생님이 꽃 관찰 활동을 전함",
+                    "evidence": "오늘은 꽃을 관찰하며 봄을 느껴보았습니다",
+                    "focus": "activity",
+                }, ensure_ascii=False)},
+                "done_reason": "stop",
+                "prompt_eval_count": 120,
+                "eval_count": 18,
+            })
 
         report = {
             "id": 99,
@@ -409,22 +438,21 @@ class NotionMirrorTests(unittest.TestCase):
             title = NotionMirror._title_oneliner(report, [])
 
         self.assertEqual(title, "선생님이 꽃 관찰 활동을 전함")
-        self.assertEqual(len(calls), 2)
 
-    def test_empty_generate_response_falls_back_to_chat_endpoint(self) -> None:
+    def test_invalid_title_json_is_rejected_with_error_details(self) -> None:
         reset_ollama_state()
-        calls: list[str] = []
 
         def fake_ollama_get(url: str, **kwargs) -> FakeResponse:
             return FakeResponse({"version": "test"})
 
         def fake_ollama_post(url: str, **kwargs) -> FakeResponse:
-            calls.append(url)
-            if url.endswith("/api/generate"):
-                return FakeResponse({"response": "", "done_reason": "stop", "eval_count": 0})
-            if url.endswith("/api/chat"):
-                return FakeResponse({"message": {"content": "선생님이 산책 소식을 전함"}})
-            raise AssertionError(f"unexpected Ollama POST {url}")
+            self.assertEqual(url, "http://ollama.test/api/chat")
+            return FakeResponse({
+                "message": {"content": "선생님이 산책 소식을 전함"},
+                "done_reason": "stop",
+                "prompt_eval_count": 100,
+                "eval_count": 8,
+            })
 
         report = {
             "id": 100,
@@ -439,13 +467,28 @@ class NotionMirrorTests(unittest.TestCase):
             patch.object(nm.requests, "get", side_effect=fake_ollama_get),
             patch.object(nm.requests, "post", side_effect=fake_ollama_post),
         ):
-            title = NotionMirror._title_oneliner(report, [])
+            details = NotionMirror._title_details(report, [])
 
-        self.assertEqual(title, "선생님이 산책 소식을 전함")
-        self.assertEqual(calls, [
-            "http://ollama.test/api/generate",
-            "http://ollama.test/api/chat",
-        ])
+        self.assertIsNone(details["title"])
+        self.assertEqual(details["flags"], ["json_parse_failed"])
+        self.assertEqual(details["metrics"]["error"], "json_parse_failed")
+        self.assertEqual(details["metrics"]["raw"], "선생님이 산책 소식을 전함")
+
+    def test_title_json_over_length_is_rejected(self) -> None:
+        details = {
+            "title": "아주 긴 제목입니다" * 10,
+            "evidence": "원문",
+            "focus": "activity",
+        }
+
+        title = NotionMirror._clean_title_oneliner(details["title"], max_chars=1000)
+        flags = NotionMirror._title_quality_flags(
+            title,
+            evidence=details["evidence"],
+            focus=details["focus"],
+        )
+
+        self.assertIn("too_long", flags)
 
     def test_report_publish_falls_back_when_gemma_title_fails(self) -> None:
         report = {
