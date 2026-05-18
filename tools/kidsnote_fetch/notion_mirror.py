@@ -1143,7 +1143,7 @@ class NotionMirror:
         cfg = _get_ollama()
         if cfg is None:
             if log_label:
-                _LOGGER.warning("%s: Ollama is unavailable", log_label)
+                _LOGGER.info("%s: Ollama is unavailable", log_label)
             return None
         try:
             r = requests.post(
@@ -1163,13 +1163,13 @@ class NotionMirror:
             out = (r.json().get("response") or "").strip()
         except Exception as e:
             if log_label:
-                _LOGGER.warning("%s: ollama call failed: %s", log_label, e)
+                _LOGGER.info("%s: ollama call failed: %s", log_label, e)
             else:
                 logging.getLogger(__name__).debug("ollama call failed: %s", e)
             return None
         if not out:
             if log_label:
-                _LOGGER.warning("%s: ollama returned an empty response", log_label)
+                _LOGGER.info("%s: ollama returned an empty response", log_label)
             return None
         # Drop wrapping ``"`` and leading dashes/asterisks
         out = out.strip().strip('"').strip("'").lstrip("- ").lstrip("* ").strip()
@@ -1194,7 +1194,7 @@ class NotionMirror:
             # the remaining Korean fragments aren't trustworthy — drop it.
             if ratio > 0.20:
                 if log_label:
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "%s: rejected LLM output after stripping %d CJK chars (%.0f%%)",
                         log_label, cjk_removed, ratio * 100,
                     )
@@ -1203,7 +1203,7 @@ class NotionMirror:
             out = " ".join(out.split())
         if len(out) < 5:
             if log_label:
-                _LOGGER.warning("%s: rejected too-short LLM output: %r", log_label, out)
+                _LOGGER.info("%s: rejected too-short LLM output: %r", log_label, out)
             return None
         return out[:max_chars]
 
@@ -1311,11 +1311,37 @@ class NotionMirror:
             if title:
                 return title
             if out:
-                _LOGGER.warning(
+                _LOGGER.info(
                     "report id=%s title attempt %d produced unusable output: %r",
                     report.get("id", "?"), attempt, out[:180],
                 )
         return None
+
+    @classmethod
+    def _fallback_title_oneliner(
+        cls,
+        report: dict[str, Any],
+        comments: list[dict[str, Any]],
+    ) -> str:
+        """Non-LLM fallback title so backup never stalls on a local model miss."""
+        candidates: list[str] = []
+        body = (report.get("content") or "").strip()
+        if body:
+            candidates.append(body)
+        for comment in comments:
+            content = (comment.get("content") or "").strip()
+            if content:
+                candidates.append(content)
+                break
+        raw = candidates[0] if candidates else ""
+        raw = re.sub(r"<[^>]+>", " ", raw)
+        raw = re.sub(r"\s+", " ", raw).strip()
+        raw = re.sub(r"^(안녕하세요|안녕하십니까)[.!~\s]*", "", raw).strip()
+        raw = re.sub(r"^(선생님|원장님|부모님|어머님|아버님)[.!~\s]*", "", raw).strip()
+        if not raw:
+            return f"알림장 #{report.get('id', '')}".strip()
+        sentence = re.split(r"(?<=[.!?。])\s+|[。]", raw, maxsplit=1)[0].strip()
+        return cls._clean_title_oneliner(sentence, max_chars=90) or raw[:90].rstrip()
 
     @classmethod
     def _summarize_text_kiwi(cls, kiwi: Any, text: str, max_chars: int) -> str:
@@ -1750,9 +1776,10 @@ class NotionMirror:
         )
         oneliner = self._title_oneliner(report, comments)
         if not oneliner:
-            raise RuntimeError(
-                f"Gemma4 title generation failed for report id={report_id}; "
-                "page was not created so the next run can retry"
+            oneliner = self._fallback_title_oneliner(report, comments)
+            _LOGGER.info(
+                "report id=%s: Gemma4 title unavailable after retries; using source-text fallback title",
+                report_id,
             )
         author_title = self._author_title_icon(report)
         title = f"[{date_str}] 알림장: {author_title} {oneliner}"

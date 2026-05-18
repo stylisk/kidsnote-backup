@@ -330,6 +330,25 @@ class NotionMirrorTests(unittest.TestCase):
         self.assertEqual(title, "선생님이 꽃 관찰 활동을 전함")
         self.assertEqual(len(calls), 2)
 
+    def test_report_publish_falls_back_when_gemma_title_fails(self) -> None:
+        report = {
+            "id": 88,
+            "date_written": "2026-05-14",
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "안녕하세요. 선생님 오늘은 꽃을 관찰하며 봄을 느껴보았습니다. 즐겁게 참여했어요.",
+        }
+
+        with patch.object(NotionMirror, "_title_oneliner", return_value=None):
+            mirror = make_mirror()
+            result = mirror.publish_report(report, FakeKidsnoteSession())
+
+        self.assertEqual(
+            result["title"],
+            "[2026-05-14] 알림장: 👩‍🏫 오늘은 꽃을 관찰하며 봄을 느껴보았습니다",
+        )
+        self.assertEqual(len(mirror.session.pages), 1)
+
 
 class FetchResumeTests(unittest.TestCase):
     def test_publish_batch_stops_before_work_when_time_budget_is_low(self) -> None:
