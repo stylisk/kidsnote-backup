@@ -1362,21 +1362,41 @@ class NotionMirror:
 
         return [comment for _, comment in sorted(enumerate(comments), key=key)]
 
+    @staticmethod
+    def _plain_context_text(value: Any) -> str:
+        text = re.sub(r"<[^>]+>", " ", str(value or ""))
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _clip_context_text(cls, value: Any, max_chars: int) -> str:
+        text = cls._plain_context_text(value)
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        marker = " ... [중간 생략] ... "
+        if max_chars <= len(marker) + 20:
+            return text[:max_chars].rstrip()
+        head_len = int((max_chars - len(marker)) * 0.55)
+        tail_len = max_chars - len(marker) - head_len
+        return f"{text[:head_len].rstrip()}{marker}{text[-tail_len:].lstrip()}"
+
     @classmethod
     def _speaker_context(
         cls,
         report: dict[str, Any],
         comments: list[dict[str, Any]],
+        *,
+        body_chars: int = 0,
+        comment_chars: int = 0,
     ) -> str:
         body_author = cls._author_display(report, emoji=False) or "작성자"
-        body = (report.get("content") or "").strip()
+        body = cls._clip_context_text(report.get("content"), body_chars)
         lines = [
             f"본문 작성자: {body_author}",
             f"본문: {body or '(본문 없음)'}",
         ]
         for idx, comment in enumerate(cls._sort_comments(comments), 1):
             c_author = cls._author_display(comment, emoji=False) or "댓글 작성자"
-            content = (comment.get("content") or "").strip()
+            content = cls._clip_context_text(comment.get("content"), comment_chars)
             if not content and comment.get("emoticon_content"):
                 content = "[이모티콘]"
             if content:
@@ -1398,6 +1418,7 @@ class NotionMirror:
             "키즈노트 알림장 제목을 한국어 한 줄로만 작성하세요. "
             "본문 작성자와 댓글 작성자를 구분하고, 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요. "
             "댓글은 오래된 순서대로 제공되므로 대화 흐름을 시간순으로 이해하세요. "
+            "본문과 댓글 원문 전체가 제공됩니다. 뒤쪽의 공지/요청/변경사항도 놓치지 마세요. "
             "'원'은 어린이집/기관일 수 있습니다. "
             "작성자 이름/역할을 괄호로 반복하지 말고, 이모지와 설명 없이 제목만 출력하세요.\n\n"
             "[예시]\n"
@@ -1406,7 +1427,7 @@ class NotionMirror:
             "댓글 1 작성자: 선생님 물빛1반 교사\n"
             "댓글 1: 네~ 놀이하며 기다리겠습니다😊\n"
             "제목: 아빠가 이담이를 어린이집으로 데리러 간다고 알림\n\n"
-            f"{context[:1200]}\n\n"
+            f"{context}\n\n"
             "제목:"
         )
         short_prompt = (
@@ -1414,8 +1435,9 @@ class NotionMirror:
             "한국어만 쓰고, 제목 문장 하나만 출력하세요. "
             "본문 작성자와 댓글 작성자를 혼동하지 마세요. "
             "댓글은 오래된 순서대로 제공됩니다. "
+            "본문과 댓글 원문 전체를 읽고 뒤쪽의 공지/요청도 확인하세요. "
             "작성자 이름/역할을 괄호로 덧붙이지 마세요.\n\n"
-            f"{context[:900]}\n\n"
+            f"{context}\n\n"
             "제목:"
         )
         for attempt, prompt in enumerate((full_prompt, short_prompt), 1):

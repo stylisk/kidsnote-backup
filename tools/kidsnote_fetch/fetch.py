@@ -583,6 +583,23 @@ def _plain_text(value: Any, *, max_chars: int | None = None) -> str:
     return text
 
 
+def _preview_text_lines(label: str, value: Any, *, max_chars: int) -> list[str]:
+    text = _plain_text(value)
+    if max_chars == 0 and text:
+        return [f"{label}: (hidden)", f"{label}_chars: {len(text)}"]
+    if not text:
+        return [f"{label}: (본문 없음)" if label == "body" else f"{label}: "]
+    if len(text) <= max_chars:
+        return [f"{label}: {text}", f"{label}_chars: {len(text)}"]
+    head_len = max(1, max_chars // 2)
+    tail_len = max(1, max_chars - head_len)
+    return [
+        f"{label}_chars: {len(text)} (showing head/tail total {max_chars})",
+        f"{label}_head: {text[:head_len].rstrip()}...",
+        f"{label}_tail: ...{text[-tail_len:].lstrip()}",
+    ]
+
+
 def _title_quality_flags(title: str | None) -> list[str]:
     if not title:
         return ["gemma_failed"]
@@ -645,20 +662,26 @@ def _run_title_quality_check(
         final_oneliner = oneliner or fallback or f"알림장 #{report_id}"
         final_title = f"[{date_str}] 알림장: {author_icon} {final_oneliner}"
         author = NotionMirror._author_display(detail, emoji=False) or "작성자"
-        body = _plain_text(detail.get("content"), max_chars=source_chars)
+        gemma_context = NotionMirror._speaker_context(detail, comments)
         print("")
         print(f"===== TITLE QA {idx}/{len(reports)} id={report_id} date={date_str} =====")
         print(f"author: {author}")
-        print(f"body: {body or '(본문 없음)'}")
+        print(f"gemma_context_chars: {len(gemma_context)} (full body/comments sent to Gemma)")
+        for line in _preview_text_lines("body", detail.get("content"), max_chars=source_chars):
+            print(line)
         if comments:
             print(f"comments: {len(comments)} (oldest first)")
             for cidx, comment in enumerate(comments, 1):
                 c_author = NotionMirror._author_display(comment, emoji=False) or "댓글 작성자"
-                c_body = _plain_text(comment.get("content"), max_chars=source_chars)
+                comment_text = comment.get("content")
+                c_body = _plain_text(comment_text)
                 if not c_body and comment.get("emoticon_content"):
-                    c_body = "[이모티콘]"
+                    comment_text = "[이모티콘]"
                 print(f"- comment {cidx} author: {c_author}")
-                print(f"  comment {cidx}: {c_body}")
+                for line in _preview_text_lines(
+                    f"  comment {cidx}", comment_text, max_chars=source_chars,
+                ):
+                    print(line)
         else:
             print("comments: 0")
         print(f"gemma_title: {oneliner or '(FAILED)'}")

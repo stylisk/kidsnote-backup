@@ -244,6 +244,35 @@ class NotionMirrorTests(unittest.TestCase):
 
         self.assertLess(context.index("댓글 1: 요즘 낮잠을 잘 자나요?"), context.index("댓글 2: 오늘 아주 잘 잤어요."))
 
+    def test_speaker_context_keeps_tail_of_long_report_body(self) -> None:
+        report = {
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": (
+                "감정 표현 놀이를 했습니다. "
+                + ("교실 놀이를 이어갔습니다. " * 120)
+                + "🏷이담이 차량시간은 전과 동일하며 월요일부터 이용 가능합니다."
+            ),
+        }
+
+        context = NotionMirror._speaker_context(report, [], body_chars=500)
+
+        self.assertIn("[중간 생략]", context)
+        self.assertIn("차량시간은 전과 동일", context)
+
+    def test_speaker_context_default_sends_full_report_body(self) -> None:
+        report = {
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "시작 " + ("긴 본문 " * 300) + "마지막 준비물 안내",
+        }
+
+        context = NotionMirror._speaker_context(report, [])
+
+        self.assertIn("시작", context)
+        self.assertIn("마지막 준비물 안내", context)
+        self.assertNotIn("[중간 생략]", context)
+
     def test_title_quality_helpers_flag_suspicious_titles(self) -> None:
         self.assertEqual(kidsnote_fetch._plain_text("<p>원문입니다</p>", max_chars=0), "(hidden)")
         self.assertEqual(kidsnote_fetch._title_quality_flags("아빠가 원님으로 데리러 감"), ["suspicious_won_nim"])
@@ -251,6 +280,13 @@ class NotionMirrorTests(unittest.TestCase):
             "author_parenthetical_suffix",
             kidsnote_fetch._title_quality_flags("등원차 이용 가능 여부 문의 (부모 정이담)"),
         )
+
+    def test_title_quality_preview_shows_head_and_tail(self) -> None:
+        lines = kidsnote_fetch._preview_text_lines("body", "앞" * 20 + "뒤" * 20, max_chars=10)
+
+        self.assertEqual(lines[0], "body_chars: 40 (showing head/tail total 10)")
+        self.assertIn("body_head:", lines[1])
+        self.assertIn("body_tail:", lines[2])
 
     def test_weather_callout_is_first_and_parent_weather_is_omitted(self) -> None:
         mirror = make_mirror()

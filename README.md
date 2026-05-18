@@ -794,16 +794,21 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 ```text
 ===== TITLE QA 1/5 id=1367868900 date=2026-03-25 =====
 author: 부모 정이담 아빠
+gemma_context_chars: 124 (full body/comments sent to Gemma)
 body: 안녕하세요. 선생님! 오늘 이담이 하원은 제가 원으로 데리러 갈게요!
-comments: 1
+body_chars: 37
+comments: 1 (oldest first)
 - comment 1 author: 선생님 물빛1반 교사
   comment 1: 네~ 놀이하며 기다리겠습니다😊
+  comment 1_chars: 18
 gemma_title: 아빠가 이담이를 어린이집으로 데리러 간다고 알림
 final_title: [2026-03-25] 알림장: 👨‍👩‍👧 아빠가 이담이를 어린이집으로 데리러 간다고 알림
 quality_flags: PASS
 ```
 
 댓글은 키즈노트 API가 최신순으로 내려줘도 QA와 Gemma 프롬프트에서는 **오래된 순서**로 재정렬됩니다. 그래서 부모 질문 → 선생님 답변 → 부모 후속 답변 같은 흐름을 시간순으로 보고 제목을 만들 수 있습니다.
+
+본문이 길면 QA 로그는 사람이 확인하기 좋게 `body_head`와 `body_tail`을 보여주지만, Gemma 프롬프트에는 본문과 댓글 원문 전체를 전달합니다. `gemma_context_chars` 값으로 실제 전달한 전체 맥락 길이를 확인할 수 있습니다.
 
 `quality_flags`가 `PASS`가 아니거나 Gemma 제목이 비어 있으면 QA run은 실패 상태로 끝납니다. 그래도 각 샘플의 원문/댓글/제목 로그는 남기므로 어떤 제목이 문제인지 확인할 수 있습니다.
 
