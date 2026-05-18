@@ -7,6 +7,19 @@
 [![Runs on GitHub Actions](https://img.shields.io/badge/runs%20on-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](#8단계-백업-실행)
 [![Notion](https://img.shields.io/badge/output-Notion-black?logo=notion)](#)
 
+## 현재 버전 요약 (2026-05-18)
+
+이 저장소는 **로컬에서는 개발·커밋만 하고, 실제 백업 실행은 GitHub Actions 클라우드에서 수행**하는 구조입니다.
+
+- 실행 워크플로: **`Kidsnote → Notion mirror`**
+- 기본 LLM 모델: **`gemma4:e4b`** (`OLLAMA_MODEL`로 고정, preflight guard로 검증)
+- 기본 저장소: **Notion DB**
+- 대용량 fallback: **Google Drive 선택 지원** — Notion 5MB 한도 초과 또는 Notion 업로드 실패 시 Drive에 올리고 Notion 페이지에 링크를 남김
+- 필수 GitHub Secrets: `KIDSNOTE_SESSION_COOKIE`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
+- 선택 GitHub Secrets: `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`
+
+변경 내역과 구현 근거는 [docs/2026-05-18-cloud-run-drive-fallback.md](docs/2026-05-18-cloud-run-drive-fallback.md)에 기록되어 있습니다.
+
 ## 📸 이렇게 백업됩니다 (실제 결과 스크린샷)
 
 **알림장 한 건 — 4개 자동 callout + 원본 본문 + 사진/댓글**
@@ -57,6 +70,7 @@
 ## 📋 목차
 
 - [이런 분께 추천드려요](#이런-분께-추천드려요)
+- [현재 버전 요약](#현재-버전-요약-2026-05-18)
 - [🎒 시작 전 준비물](#-시작-전-준비물-한눈에-보기)
 - [왜 필요한가요](#왜-이-도구가-필요한가요)
 - [📸 이렇게 백업됩니다 — 실제 스크린샷](#-이렇게-백업됩니다-실제-결과-스크린샷)
@@ -70,8 +84,9 @@
   - [4단계. DB에 통합 연결](#4단계-노션-db에-통합-연결하기)
   - [5단계. DB ID 복사](#5단계-노션-db-id-복사하기)
   - [6단계. 쿠키 추출](#6단계-키즈노트-sessionid-쿠키-가져오기-chrome-기준)
-  - [7단계. GitHub Secrets](#7단계-github에-3개-비밀-값-등록하기)
+  - [7단계. GitHub Secrets](#7단계-github에-비밀-값-등록하기)
   - [8단계. 실행 + 자동 모드 ON](#8단계-백업-실행)
+- [현재 변경 기록](#-현재-변경-기록)
 - [(선택) 노션 페이지 웹 공개](#-선택-노션-페이지를-웹에-공개하기)
 - [노션 DB 보기 추천 (리스트 뷰)](#-노션-db-보기-추천--리스트-뷰)
 - [두 번째 이후 백업 (사용자가 할 일 거의 없음)](#-두-번째-이후-백업--거의-안-해도-됨)
@@ -107,6 +122,7 @@
 | **인터넷 연결** | GitHub·노션 페이지 클릭 | - |
 | **Chrome 또는 Edge** | 6단계 쿠키 추출 시 개발자 도구 사용 | 무료 |
 | **이메일 주소** | GitHub·노션 가입 + 실패 알림 받기 | - |
+| **Google Cloud / Drive** | 선택: 5MB 초과 동영상·PDF를 Drive 링크로 보존할 때만 필요 | 무료 사용량 내 |
 
 ### 2. 만들어야 하는 계정 3개 (0단계에서 진행)
 
@@ -125,6 +141,7 @@
 | **GitHub Actions** (public fork) | **무제한** | 매월 ~360분 (대시보드 갱신 포함) |
 | **GitHub Actions** (private fork) | 월 2,000분 | 첫 달 ~1,800분 (빠듯), 이후 ~360분 |
 | **노션 Personal** | 무제한 블록 + 파일당 5MB | 1년치 ~1-3GB |
+| **Google Drive API** (선택) | 개인 Drive 저장공간 사용 | 5MB 초과 fallback 첨부만 |
 | **Ollama LLM** | GitHub 러너 안에서 무료 실행 | 외부 API 비용 0원 |
 
 > 💡 **권장: Public fork** — GitHub Actions 무제한이라 첫 달 18-30시간 백업도 무관. 개인정보(쿠키·토큰)는 모두 GitHub Secrets에 암호화되어 코드 공개와 상관없이 안전합니다.
@@ -225,6 +242,27 @@
 
 데이터는 **키즈노트 → GitHub 임시 메모리 → 내 노션** 으로만 흐릅니다. 외부 서버에 저장되거나 노출되지 않습니다.
 
+## 🧾 현재 변경 기록
+
+2026-05-18 기준 현재 버전은 다음 변경을 포함합니다.
+
+| 영역 | 현재 상태 |
+|---|---|
+| 실행 위치 | 로컬 개발 후 GitHub Actions 클라우드에서 `Kidsnote → Notion mirror` 실행 |
+| LLM 모델 | `gemma4:e4b`로 고정. workflow preflight에서 모델명과 cache key를 로그로 출력하고 다른 모델이면 실패 |
+| Ollama cache | `OLLAMA_CACHE_KEY=ollama-gemma4-e4b-v2` |
+| Python 의존성 | `requests`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트. `Pillow`/`piexif`는 workflow에서 별도 설치 |
+| Notion 업로드 | Notion `file_uploads` API 사용, 사진은 EXIF GPS 제거 후 5MB 이하로 압축 |
+| Google Drive fallback | 선택 기능. 대용량 동영상/PDF 또는 Notion 업로드 실패 파일을 Drive에 올리고 Notion에는 외부 링크로 삽입 |
+| 권한 설계 | GitHub에는 Google 계정 비밀번호를 넣지 않음. 서비스 계정 JSON만 Secret에 넣고, 해당 서비스 계정에 공유한 Drive 폴더만 접근 |
+
+관련 파일:
+
+- [`.github/workflows/kidsnote-to-notion.yml`](.github/workflows/kidsnote-to-notion.yml) — GitHub Actions 실행, Gemma4 guard, Secrets 전달
+- [`tools/kidsnote_fetch/notion_mirror.py`](tools/kidsnote_fetch/notion_mirror.py) — Notion 업로드, Google Drive fallback, 외부 링크 블록 생성
+- [`tools/kidsnote_fetch/requirements.txt`](tools/kidsnote_fetch/requirements.txt) — 런타임 의존성
+- [상세 변경 기록](docs/2026-05-18-cloud-run-drive-fallback.md)
+
 ---
 
 # 🚀 시작하기
@@ -298,13 +336,13 @@
 
 "Fork(포크)"는 **남의 GitHub 프로젝트를 내 계정에 복사**한다는 뜻입니다. 원본은 그대로 두고, 내 사본에서 설정을 바꿉니다.
 
-1. GitHub에서 **이 페이지** ([https://github.com/redchupa/kidsnote-backup](https://github.com/redchupa/kidsnote-backup)) 를 엽니다 (이미 보고 있다면 그대로)
+1. GitHub에서 **이 페이지** ([https://github.com/stylisk/kidsnote-backup](https://github.com/stylisk/kidsnote-backup)) 를 엽니다 (이미 보고 있다면 그대로)
 2. 페이지 **우측 상단**에서 **검은색 `Fork` 버튼** 찾기 (별 모양 `Star` 버튼 옆에 있음)
 3. **`Fork`** 클릭
 4. 다음 화면에서 옵션 그대로 두고 페이지 하단 **녹색 `Create fork` 버튼** 클릭
 5. 잠시 후 자동으로 **본인 계정의 사본 페이지**로 이동됨
 
-✅ **1단계 성공 신호**: 페이지 좌측 상단의 경로 표시가 `내깃허브아이디 / kidsnote-backup` (원본은 `redchupa / kidsnote-backup`이었음).
+✅ **1단계 성공 신호**: 페이지 좌측 상단의 경로 표시가 `내깃허브아이디 / kidsnote-backup` (원본은 `stylisk / kidsnote-backup`이었음).
 
 > 💡 **Public vs Private fork** — 기본값(public)이 권장됩니다.
 > - **Public** (기본): GitHub Actions 무제한 무료 사용 가능. **개인정보(쿠키·토큰)는 Secrets에 분리 저장**되어 코드 공개와 무관하게 안전.
@@ -632,14 +670,67 @@ NOTION_TOKEN                  Updated now
 
 ### 7-4. 선택: 대용량 첨부파일용 Google Drive fallback
 
-노션 무료 플랜의 파일당 5MB 제한 때문에 큰 동영상/PDF는 기본적으로 건너뜁니다. 그 파일까지 링크로 남기고 싶을 때만 Google Drive 폴더와 서비스 계정을 준비한 뒤 아래 2개 시크릿을 추가합니다.
+노션 무료 플랜의 파일당 5MB 제한 때문에 큰 동영상/PDF는 기본적으로 건너뜁니다. 그 파일까지 링크로 남기고 싶을 때만 Google Drive 폴더와 서비스 계정을 준비한 뒤 아래 2개 시크릿을 추가합니다. 이미 이 2개를 등록했다면 바로 [8단계](#8단계-백업-실행)로 넘어가면 됩니다.
+
+#### A. Google 쪽에서 준비할 것
+
+1. Google Cloud Console에서 프로젝트를 하나 만듭니다.
+2. **Google Drive API**를 활성화합니다.
+3. **서비스 계정**을 만듭니다.
+4. 서비스 계정의 **JSON 키**를 다운로드합니다.
+5. Google Drive에 fallback 전용 폴더를 만듭니다.
+6. 그 Drive 폴더를 서비스 계정 JSON 안의 `client_email` 주소에 **편집자** 권한으로 공유합니다.
+7. Drive 폴더 URL의 마지막 ID 값을 복사합니다.
+
+Drive 폴더 URL 예시:
+
+```text
+https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
+```
+
+여기서 Secret에 넣을 폴더 ID:
+
+```text
+1AbCdEfGhIjKlMnOpQrStUvWxYz
+```
+
+> 중요: 서비스 계정은 내 Google Drive 전체를 보는 계정이 아닙니다. 위에서 공유한 Drive 폴더에만 접근할 수 있습니다.
+
+#### B. GitHub Secrets에 추가할 것
 
 | Name | Secret 값 |
 |---|---|
 | `GOOGLE_DRIVE_FOLDER_ID` | 업로드할 Google Drive 폴더 ID |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Cloud 서비스 계정 JSON 전체 또는 base64 인코딩 값 |
 
-Drive 폴더는 서비스 계정 JSON 안의 `client_email` 주소에 편집 권한으로 공유되어 있어야 합니다.
+등록 경로:
+
+1. GitHub 저장소 → **Settings**
+2. **Secrets and variables** → **Actions**
+3. **New repository secret**
+4. `GOOGLE_DRIVE_FOLDER_ID` 추가
+5. 다시 **New repository secret**
+6. `GOOGLE_SERVICE_ACCOUNT_JSON` 추가
+
+`GOOGLE_SERVICE_ACCOUNT_JSON`에는 다운로드한 `.json` 파일의 전체 내용을 그대로 붙여넣습니다.
+
+```json
+{
+  "type": "service_account",
+  "project_id": "...",
+  "private_key_id": "...",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "client_email": "kidsnote-backup-drive@....iam.gserviceaccount.com",
+  "token_uri": "https://oauth2.googleapis.com/token"
+}
+```
+
+#### C. 작동 방식
+
+- `GOOGLE_DRIVE_FOLDER_ID`와 `GOOGLE_SERVICE_ACCOUNT_JSON`이 둘 다 있으면 Drive fallback이 켜집니다.
+- 사진은 먼저 EXIF GPS 제거와 JPEG 압축을 시도하고, 그래도 5MB를 넘거나 Notion 업로드가 실패하면 Drive fallback을 시도합니다.
+- 동영상/PDF/엑셀 등 일반 첨부는 5MB를 넘으면 Notion 직접 업로드 대신 Drive fallback을 시도합니다.
+- fallback으로 Drive에 올라간 파일은 Notion에서 열 수 있도록 해당 파일에 `anyone reader` 권한이 붙습니다. 즉, **내 Drive 전체가 공개되는 것이 아니라 fallback으로 업로드된 개별 파일만 링크 열람 가능** 상태가 됩니다.
 
 이 2개가 없으면 기존처럼 노션 업로드만 시도합니다.
 
@@ -903,14 +994,14 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 
 # 🔁 코드 업데이트가 있을 때 — 내 fork 동기화
 
-이 프로젝트는 가끔 버그 수정·기능 개선이 원본 repo(`redchupa/kidsnote-backup`)에 푸시됩니다. **내 fork는 자동으로 따라가지 않으므로**, 가끔 한 번씩 sync해야 최신 코드의 혜택을 받을 수 있어요.
+이 프로젝트는 가끔 버그 수정·기능 개선이 원본 repo(`stylisk/kidsnote-backup`)에 푸시됩니다. **내 fork는 자동으로 따라가지 않으므로**, 가끔 한 번씩 sync해야 최신 코드의 혜택을 받을 수 있어요.
 
 > 💡 동기화는 **선택**입니다. 현재 잘 돌아가고 있으면 그대로 두셔도 OK. 새 기능이나 fix를 받고 싶을 때만.
 
 ### 방법 (30초):
 
 1. 본인 fork 페이지(`https://github.com/내깃허브아이디/kidsnote-backup`) 접속
-2. 페이지 상단에 **`This branch is N commits behind redchupa:main`** 안내가 보이면 sync 가능 상태
+2. 페이지 상단에 **`This branch is N commits behind stylisk:main`** 안내가 보이면 sync 가능 상태
 3. 그 옆 **`Sync fork`** 버튼 클릭 → 드롭다운에서 **`Update branch`** (영문: `Update branch`) 클릭
 4. 다음 cron 실행부터 새 코드 적용 (또는 즉시 적용하려면 수동 trigger)
 
@@ -1027,7 +1118,9 @@ Drive fallback이 켜져 있으면 대신 `uploaded ... to Google Drive fallback
 ### 내 데이터가 안전한가요?
 
 - 모든 비밀값은 **GitHub Secrets**로 암호화 저장 (코드 어디에도 평문 등장 X)
-- 알림장과 사진은 **GitHub Actions 임시 메모리 → 내 노션** 으로만 흐르고, 다른 곳에 저장되지 않음
+- 알림장과 사진은 기본적으로 **GitHub Actions 임시 메모리 → 내 노션** 으로 흐르고, 다른 곳에 저장되지 않음
+- Google Drive fallback을 켠 경우, Notion 5MB 제한을 넘거나 Notion 업로드가 실패한 첨부만 사용자가 지정한 Drive 폴더에 저장됨
+- Drive fallback 파일은 Notion에서 열 수 있도록 개별 파일에 링크 열람 권한이 붙음. 내 Google Drive 전체가 공개되는 것은 아님
 - 워크플로 실행이 끝나면 GitHub 측 임시 데이터는 즉시 삭제
 - **위치 정보(GPS)는 노션 업로드 전에 제거** — 노션 측에도 위치 흔적 없음
 - 코드 전체가 **MIT 라이선스** 오픈소스 — fork한 본인이 직접 검토 가능 (Python 약 4,000줄, `tools/kidsnote_fetch/`)
@@ -1056,11 +1149,14 @@ UI는 노션이 가끔 바뀝니다. 메뉴 이름이 달라도 다음 기능을
 | `Database not connected to integration` | 4단계 빠뜨림 | 4단계 진행 |
 | 워크플로가 5분 만에 fail | 코드 import 에러 — fork가 오래된 코드일 가능성 | fork 페이지에서 `Sync fork` 클릭해서 최신 코드 가져오기 |
 | 노션 페이지에 사진이 안 보임 | 노션 무료 한도(스토리지) 초과 또는 5MB 이상 사진 | 노션 워크스페이스 스토리지 사용량 확인. 사진은 자동 압축됨 |
+| `Google Drive fallback secret could not be parsed` | `GOOGLE_SERVICE_ACCOUNT_JSON` 값이 JSON 전체가 아니거나 붙여넣기 중 깨짐 | 서비스 계정 JSON 파일 전체를 다시 Secret에 붙여넣기 |
+| `Google Drive fallback upload failed ... File not found` | `GOOGLE_DRIVE_FOLDER_ID`가 틀렸거나 서비스 계정에 폴더 편집 권한이 없음 | Drive 폴더 ID 확인 + 폴더를 JSON의 `client_email`에 편집자로 공유 |
+| `OLLAMA_MODEL must be gemma4:e4b` | workflow 모델 값이 바뀜 | `.github/workflows/kidsnote-to-notion.yml`의 `OLLAMA_MODEL`을 `gemma4:e4b`로 복구 |
 | 모바일/태블릿에서 단계 진행 안 됨 | 모바일은 미지원 | 데스크톱/노트북 사용 |
 
 ### 정말 막혔다면
 
-GitHub Issues 페이지에 질문을 올려주세요: https://github.com/redchupa/kidsnote-backup/issues
+GitHub Issues 페이지에 질문을 올려주세요: https://github.com/stylisk/kidsnote-backup/issues
 
 질문 시 첨부:
 - 어느 단계에서 막혔는지 (예: "4단계")
@@ -1072,10 +1168,10 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/redchup
 # 🛠️ 기술 스택 (개발자용)
 
 **런타임**
-- Python 3.12 (+ `requests`, `Pillow`, `piexif`, `kiwipiepy`)
+- Python 3.12 (+ `requests`, `browser-cookie3`, `kiwipiepy`, `google-api-python-client`, `google-auth`; workflow에서 `Pillow`, `piexif` 별도 설치)
 - GitHub Actions (ubuntu-latest, 단일 job 6h hard-cap)
 - Notion API `2022-06-28` (`file_uploads` + `databases` + 100-children chunked PATCH)
-- Google Drive API (선택): Notion 5MB 제한 또는 업로드 실패 시 외부 링크 fallback
+- Google Drive API (선택): `drive.file` scope로 Notion 5MB 제한 또는 업로드 실패 시 외부 링크 fallback
 - 키즈노트 비공식 API `/api/v1_2/children/<id>/reports/`
 - **Ollama** on the runner (`gemma4:e4b`, CPU-only) — 7개 대시보드 중 LLM 4개 생성에 사용. 모델·바이너리는 `actions/cache@v4`로 영구 캐싱
 
