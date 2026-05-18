@@ -22,6 +22,7 @@ Privacy guards:
 """
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
@@ -136,7 +137,7 @@ def _addressee(child_name: str) -> str:
 def _strip_lead_meta(text: str) -> str:
     """Drop leading lines that restate the task instead of answering it.
 
-    llama3.1 sometimes echoes the prompt back as a preamble
+    Local models sometimes echo the prompt back as a preamble
     (``알림장을 바탕으로 ~를 써보겠습니다.``) before producing the
     real content. We detect short opening lines that contain task
     verbs and drop them until the first real-content line.
@@ -306,6 +307,90 @@ NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 DEFAULT_MAX_IMAGE_BYTES = 5_000_000   # Notion free-tier per-file cap.
 MAX_BLOCK_TEXT = 1900                 # Notion paragraph rich_text limit (2000).
+EXTERNAL_REF_PREFIX = "external:"
+
+
+class _DriveFallbackUploader:
+    """Small Google Drive uploader used only when Notion file_uploads cannot hold a file."""
+
+    def __init__(self, *, folder_id: str, service_account_info: dict[str, Any]) -> None:
+        self.folder_id = folder_id
+        self.service_account_info = service_account_info
+        self._service: Any = None
+
+    @staticmethod
+    def _load_service_account(raw: str) -> dict[str, Any] | None:
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            if raw.startswith("{"):
+                return json.loads(raw)
+            decoded = base64.b64decode(raw).decode("utf-8")
+            return json.loads(decoded)
+        except Exception as e:
+            _LOGGER.warning("Google Drive fallback secret could not be parsed: %s", e)
+            return None
+
+    @classmethod
+    def from_env(cls) -> "_DriveFallbackUploader | None":
+        import os
+
+        folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+        raw_info = (
+            os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+            or os.environ.get("GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON", "")
+        )
+        if not folder_id or not raw_info.strip():
+            return None
+        info = cls._load_service_account(raw_info)
+        if not info:
+            return None
+        return cls(folder_id=folder_id, service_account_info=info)
+
+    def _client(self) -> Any:
+        if self._service is not None:
+            return self._service
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+        except ImportError as e:
+            raise RuntimeError(
+                "Google Drive fallback dependencies are missing. "
+                "Install google-api-python-client and google-auth."
+            ) from e
+
+        creds = service_account.Credentials.from_service_account_info(
+            self.service_account_info,
+            scopes=["https://www.googleapis.com/auth/drive.file"],
+        )
+        self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return self._service
+
+    def upload(self, raw: bytes, filename: str, mime: str) -> str | None:
+        try:
+            from googleapiclient.http import MediaIoBaseUpload
+
+            service = self._client()
+            media = MediaIoBaseUpload(io.BytesIO(raw), mimetype=mime, resumable=False)
+            created = service.files().create(
+                body={"name": filename, "parents": [self.folder_id]},
+                media_body=media,
+                fields="id, webViewLink",
+                supportsAllDrives=True,
+            ).execute()
+            file_id = created["id"]
+            service.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+            _LOGGER.info("uploaded %s to Google Drive fallback", filename)
+            return f"https://drive.google.com/uc?export=view&id={file_id}"
+        except Exception as e:
+            _LOGGER.warning("Google Drive fallback upload failed for %s: %s", filename, e)
+            return None
 
 # Kidsnote life-record status codes → human Korean. Unknown values are
 # rendered as-is, so missing entries here just degrade gracefully.
@@ -466,6 +551,9 @@ class NotionMirror:
         self.strip_exif_gps = strip_exif_gps
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.drive_fallback = _DriveFallbackUploader.from_env()
+        if self.drive_fallback is not None:
+            _LOGGER.info("Google Drive fallback enabled for oversized/failed Notion uploads")
         # Resolved on first use via `_resolve_schema()`.
         self._prop_title: str | None = None
         self._prop_report_id: str | None = None
@@ -526,6 +614,22 @@ class NotionMirror:
             "Notion-Version": NOTION_VERSION,
             "Content-Type": content_type,
         }
+
+    def _upload_to_drive_fallback(
+        self,
+        raw: bytes,
+        filename: str,
+        mime: str,
+        *,
+        kind: str,
+    ) -> str | None:
+        if self.drive_fallback is None:
+            return None
+        url = self.drive_fallback.upload(raw, filename, mime)
+        if not url:
+            return None
+        _LOGGER.info("%s %s will be embedded from Google Drive fallback", kind, filename)
+        return EXTERNAL_REF_PREFIX + url
 
     # ----------------------------------------------------------- dedup
 
@@ -594,17 +698,11 @@ class NotionMirror:
         raw: bytes,
         filename_hint: str,
     ) -> str | None:
-        """EXIF strip → shrink → file_uploads. Returns the file_upload_id or None on failure."""
+        """EXIF strip -> shrink -> Notion file_uploads, with optional Drive fallback."""
         is_jpeg = filename_hint.lower().endswith((".jpg", ".jpeg"))
         if self.strip_exif_gps and is_jpeg:
             raw = _strip_gps_in_memory(raw)
         data, was_compressed = compress_image_to_bytes(raw, self.max_image_bytes)
-        if len(data) > self.max_image_bytes:
-            _LOGGER.warning(
-                "image %s still %d bytes after compression > %d cap; skipping",
-                filename_hint, len(data), self.max_image_bytes,
-            )
-            return None
 
         if was_compressed:
             mime = "image/jpeg"
@@ -618,6 +716,18 @@ class NotionMirror:
         else:
             mime = "application/octet-stream"
             send_name = filename_hint
+
+        if len(data) > self.max_image_bytes:
+            fallback_ref = self._upload_to_drive_fallback(
+                data, send_name, mime, kind="image",
+            )
+            if fallback_ref:
+                return fallback_ref
+            _LOGGER.warning(
+                "image %s still %d bytes after compression > %d cap; skipping",
+                filename_hint, len(data), self.max_image_bytes,
+            )
+            return None
 
         try:
             # Step 1 — open an upload handle.
@@ -633,7 +743,7 @@ class NotionMirror:
             file_upload_id = handle["id"]
         except Exception as e:
             _LOGGER.warning("file_uploads create failed for %s: %s", filename_hint, e)
-            return None
+            return self._upload_to_drive_fallback(data, send_name, mime, kind="image")
 
         try:
             # Step 2 — POST the actual bytes (multipart).
@@ -649,7 +759,7 @@ class NotionMirror:
             r.raise_for_status()
         except Exception as e:
             _LOGGER.warning("file upload PUT failed for %s: %s", filename_hint, e)
-            return None
+            return self._upload_to_drive_fallback(data, send_name, mime, kind="image")
 
         return file_upload_id
 
@@ -686,18 +796,23 @@ class NotionMirror:
     ) -> str | None:
         """Upload a non-image attachment as-is (no compression).
 
-        Notion's per-file cap (5 MiB on free tier) is enforced strictly here:
-        anything over the cap is skipped with a warning. Returns file_upload_id
-        or None on skip/error. Used for videos and generic files (PDF/XLSX/...).
+        Notion's per-file cap (5 MiB on free tier) is enforced first; anything
+        over the cap can be preserved through the optional Drive fallback.
+        Returns a Notion file_upload_id, an external ref, or None on skip/error.
         """
+        mime = self._guess_mime(filename)
         if len(raw) > self.max_image_bytes:
+            fallback_ref = self._upload_to_drive_fallback(
+                raw, filename, mime, kind=kind,
+            )
+            if fallback_ref:
+                return fallback_ref
             _LOGGER.warning(
                 "%s %s is %d bytes > %d cap; skipping (Notion free tier limit)",
                 kind, filename, len(raw), self.max_image_bytes,
             )
             return None
 
-        mime = self._guess_mime(filename)
         try:
             r = self.session.post(
                 f"{NOTION_API}/file_uploads",
@@ -711,7 +826,7 @@ class NotionMirror:
             file_upload_id = handle["id"]
         except Exception as e:
             _LOGGER.warning("file_uploads create failed for %s %s: %s", kind, filename, e)
-            return None
+            return self._upload_to_drive_fallback(raw, filename, mime, kind=kind)
 
         try:
             r = self.session.post(
@@ -726,7 +841,7 @@ class NotionMirror:
             r.raise_for_status()
         except Exception as e:
             _LOGGER.warning("%s upload PUT failed for %s: %s", kind, filename, e)
-            return None
+            return self._upload_to_drive_fallback(raw, filename, mime, kind=kind)
 
         return file_upload_id
 
@@ -745,6 +860,55 @@ class NotionMirror:
             "object": "block",
             "type": "paragraph",
             "paragraph": {"rich_text": [rt]},
+        }
+
+    @staticmethod
+    def _ref_payload(ref: str) -> dict[str, Any]:
+        if ref.startswith(EXTERNAL_REF_PREFIX):
+            return {
+                "type": "external",
+                "external": {"url": ref[len(EXTERNAL_REF_PREFIX):]},
+            }
+        return {
+            "type": "file_upload",
+            "file_upload": {"id": ref},
+        }
+
+    @classmethod
+    def _image_block(cls, ref: str) -> dict[str, Any]:
+        return {
+            "object": "block",
+            "type": "image",
+            "image": cls._ref_payload(ref),
+        }
+
+    @classmethod
+    def _video_block(cls, ref: str) -> dict[str, Any]:
+        if ref.startswith(EXTERNAL_REF_PREFIX):
+            payload = cls._ref_payload(ref)
+            payload["caption"] = [{"type": "text", "text": {"content": "동영상 (Google Drive)"}}]
+            return {
+                "object": "block",
+                "type": "file",
+                "file": payload,
+            }
+        return {
+            "object": "block",
+            "type": "video",
+            "video": cls._ref_payload(ref),
+        }
+
+    @classmethod
+    def _file_block(cls, ref: str, filename: str) -> dict[str, Any]:
+        payload = cls._ref_payload(ref)
+        if payload["type"] == "external":
+            payload["caption"] = [{"type": "text", "text": {"content": filename[:100]}}]
+        else:
+            payload["name"] = filename[:100]
+        return {
+            "object": "block",
+            "type": "file",
+            "file": payload,
         }
 
     def _build_children(
@@ -852,14 +1016,7 @@ class NotionMirror:
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "사진"}}]},
             })
             for fid in image_upload_ids:
-                blocks.append({
-                    "object": "block",
-                    "type": "image",
-                    "image": {
-                        "type": "file_upload",
-                        "file_upload": {"id": fid},
-                    },
-                })
+                blocks.append(self._image_block(fid))
 
         # Videos (only those that fit Notion's per-file cap)
         if video_upload_ids:
@@ -869,14 +1026,7 @@ class NotionMirror:
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "동영상"}}]},
             })
             for fid in video_upload_ids:
-                blocks.append({
-                    "object": "block",
-                    "type": "video",
-                    "video": {
-                        "type": "file_upload",
-                        "file_upload": {"id": fid},
-                    },
-                })
+                blocks.append(self._video_block(fid))
 
         # Generic file attachments (PDF, Excel, etc.)
         if file_upload_ids:
@@ -886,15 +1036,7 @@ class NotionMirror:
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "첨부 파일"}}]},
             })
             for fid, fname in file_upload_ids:
-                blocks.append({
-                    "object": "block",
-                    "type": "file",
-                    "file": {
-                        "type": "file_upload",
-                        "file_upload": {"id": fid},
-                        "name": fname[:100],
-                    },
-                })
+                blocks.append(self._file_block(fid, fname))
 
         return blocks
 
@@ -1564,11 +1706,7 @@ class NotionMirror:
             hint = img.get("original_file_name") or f"menu_{text_field}.jpg"
             fid = self._upload_one_image(raw, hint)
             if fid:
-                out.append({
-                    "object": "block",
-                    "type": "image",
-                    "image": {"type": "file_upload", "file_upload": {"id": fid}},
-                })
+                out.append(self._image_block(fid))
         return out
 
     @staticmethod
@@ -2021,11 +2159,7 @@ class NotionMirror:
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "사진"}}]},
             })
             for fid in image_upload_ids:
-                blocks.append({
-                    "object": "block",
-                    "type": "image",
-                    "image": {"type": "file_upload", "file_upload": {"id": fid}},
-                })
+                blocks.append(self._image_block(fid))
         if video_upload_ids:
             blocks.append({
                 "object": "block",
@@ -2033,11 +2167,7 @@ class NotionMirror:
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "동영상"}}]},
             })
             for fid in video_upload_ids:
-                blocks.append({
-                    "object": "block",
-                    "type": "video",
-                    "video": {"type": "file_upload", "file_upload": {"id": fid}},
-                })
+                blocks.append(self._video_block(fid))
         if file_upload_ids:
             blocks.append({
                 "object": "block",
@@ -2045,15 +2175,7 @@ class NotionMirror:
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "첨부 파일"}}]},
             })
             for fid, fname in file_upload_ids:
-                blocks.append({
-                    "object": "block",
-                    "type": "file",
-                    "file": {
-                        "type": "file_upload",
-                        "file_upload": {"id": fid},
-                        "name": fname[:100],
-                    },
-                })
+                blocks.append(self._file_block(fid, fname))
 
         # ---- Append comments (parent + teacher replies) at the end ----
         if comment_kind and item.get("num_comments"):
@@ -2231,14 +2353,7 @@ class NotionMirror:
                         hint = meal_img.get("original_file_name") or f"menu_{menu_id}_{text_field}.jpg"
                         fid = self._upload_one_image(raw, hint)
                         if fid:
-                            blocks.append({
-                                "object": "block",
-                                "type": "image",
-                                "image": {
-                                    "type": "file_upload",
-                                    "file_upload": {"id": fid},
-                                },
-                            })
+                            blocks.append(self._image_block(fid))
                             images_uploaded += 1
                         else:
                             images_failed += 1
@@ -2508,8 +2623,8 @@ class NotionMirror:
             blocks.append(self._h2("📎 첨부물 누계"))
             lines = [
                 f"📷 사진 {att.get('images', 0):,} 장",
-                f"🎬 동영상 {att.get('videos', 0):,} 개  (5MB 이상 skip {att.get('videos_skipped', 0)} 개)",
-                f"📄 첨부파일 {att.get('files', 0):,} 개  (5MB 이상 skip {att.get('files_skipped', 0)} 개)",
+                f"🎬 동영상 {att.get('videos', 0):,} 개  (업로드 실패/skip {att.get('videos_skipped', 0)} 개)",
+                f"📄 첨부파일 {att.get('files', 0):,} 개  (업로드 실패/skip {att.get('files_skipped', 0)} 개)",
             ]
             for line in lines:
                 blocks.append({
@@ -2853,8 +2968,7 @@ class NotionMirror:
             items = reports_by_month[ym]
             if not items:
                 continue
-            # Shrunk to 2500 chars (was 4500) — llama3.1:8b on CPU was
-            # timing out at 180s with the longer context on every month.
+            # Keep context compact enough for CPU-only Ollama to finish in time.
             joined = "\n\n".join(
                 (r.get("content") or "").strip()[:200] for r in items[:15]
             )[:2500]
@@ -3065,7 +3179,7 @@ class NotionMirror:
             items = reports_by_quarter[q]
             if not items:
                 continue
-            # Shrunk from 5000 chars (was timing out llama3.1:8b on CPU)
+            # Keep context compact enough for CPU-only Ollama to finish in time.
             joined = "\n".join(
                 (r.get("content") or "").strip()[:150] for r in items[:20]
             )[:2500]

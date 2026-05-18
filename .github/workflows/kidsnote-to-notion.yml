@@ -54,6 +54,10 @@ concurrency:
   group: kidsnote-to-notion
   cancel-in-progress: false
 
+env:
+  OLLAMA_MODEL: gemma4:e4b
+  OLLAMA_CACHE_KEY: ollama-gemma4-e4b-v2
+
 jobs:
   mirror:
     runs-on: ubuntu-latest
@@ -81,20 +85,34 @@ jobs:
           # to Notion's 5 MiB per-file cap.
           pip install pillow piexif
 
+      - name: Preflight guard
+        run: |
+          set -eu
+          echo "workflow sha: ${GITHUB_SHA}"
+          echo "ollama model: ${OLLAMA_MODEL}"
+          echo "ollama cache key: ${OLLAMA_CACHE_KEY}"
+          echo "requirements:"
+          nl -ba tools/kidsnote_fetch/requirements.txt
+
+          if [ "${OLLAMA_MODEL}" != "gemma4:e4b" ]; then
+            echo "::error::OLLAMA_MODEL must be gemma4:e4b, got '${OLLAMA_MODEL}'"
+            exit 1
+          fi
+          if grep -Eiq '^[[:space:]]*(pillow|piexif)([[:space:]<>=!~]|$)' tools/kidsnote_fetch/requirements.txt; then
+            echo "::error::pillow/piexif must stay out of requirements.txt; workflow installs image helpers separately"
+            exit 1
+          fi
+
       # ---- Ollama for body summary + LLM dashboards ----
       # Local LLM runs inside the runner — no API key / cost.
-      # llama3.1:8b (~4.7GB): chosen over qwen2.5:7b after the latter
-      # was caught (a) copy-pasting input as "child diary" instead of
-      # converting to 1st-person, (b) leaking instruction meta-phrases
-      # like "느껴지게" verbatim into output, (c) returning "없음" for
-      # every milestone candidate. llama3.1 has stronger
-      # instruction-following for the role-transformation tasks here.
+      # gemma4:e4b is pinned by the preflight guard above so prompt behavior
+      # and cache identity drift loudly instead of silently changing output.
       - name: Cache Ollama models
         id: ollama-cache
         uses: actions/cache@v4
         with:
           path: ~/.ollama
-          key: ollama-llama3.1-8b-v1
+          key: ${{ env.OLLAMA_CACHE_KEY }}
 
       - name: Install Ollama + pull model
         run: |
@@ -112,16 +130,18 @@ jobs:
             sleep 1
           done
           # Pull model (cached after first run)
-          ollama pull llama3.1:8b
+          ollama pull "${OLLAMA_MODEL}"
 
       - name: Mirror Kidsnote → Notion
         env:
           KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           # Tell notion_mirror.py where Ollama lives + which model to use
           OLLAMA_HOST: "http://localhost:11434"
-          OLLAMA_MODEL: "llama3.1:8b"
+          OLLAMA_MODEL: ${{ env.OLLAMA_MODEL }}
           PYTHONUNBUFFERED: "1"
         run: |
           set -eu

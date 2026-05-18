@@ -48,9 +48,9 @@
 
 > ⚠️ **노션 무료 플랜 5 MiB 파일 크기 제한**
 > - **사진**: 5MB 초과 시 자동으로 압축해서 업로드 (거의 100% 성공)
-> - **동영상·첨부파일**: 5MB **미만**만 업로드. 그 이상은 자동 skip (해당 파일만 누락, 페이지는 정상)
+> - **동영상·첨부파일**: 기본은 5MB **미만**만 노션에 업로드. 선택사항인 Google Drive fallback을 켜면 5MB 이상도 Drive 링크로 남깁니다.
 >
-> 노션 유료 플랜(파일당 5 GiB)이면 모두 업로드됩니다.
+> 노션 유료 플랜(파일당 5 GiB)을 쓰면 코드의 안전 한도를 조정해 더 크게 받을 수 있습니다.
 
 ---
 
@@ -197,7 +197,7 @@
 | 🌱 **{년}년 분기별 관심사** | 분기별 자녀가 가장 좋아한 활동·사물·사람 TOP 5 |
 | 💌 **{년}년 선생님께** | 1년치 알림장 기반의 감사 편지 초안 (졸업·연말에 가족이 다듬어 사용) |
 
-> 💡 모든 LLM 호출은 **GitHub Actions 러너 안의 무료 Ollama**(`llama3.1:8b`)로 처리되어 외부 API 비용·노출이 없습니다.
+> 💡 모든 LLM 호출은 **GitHub Actions 러너 안의 무료 Ollama**(`gemma4:e4b`)로 처리되어 외부 API 비용·노출이 없습니다.
 
 ---
 
@@ -212,6 +212,7 @@
             │  - 새 알림장 fetch + dedup
             ▼
    사진 GPS 제거 → 5MB 초과시 자동 압축
+            │  - 선택 시 대용량 첨부는 Google Drive 링크로 fallback
             │
             ▼
    Ollama (러너 안의 무료 LLM)       ← API 비용 0원
@@ -579,7 +580,7 @@ https://www.notion.so/키즈노트백업-238f5e29c0894adfb6c4d8e1a5b2c3d4?v=...
 
 ---
 
-## 7단계. GitHub에 3개 비밀 값 등록하기
+## 7단계. GitHub에 비밀 값 등록하기
 
 > 🕐 **약 3분**
 >
@@ -600,7 +601,7 @@ https://www.notion.so/키즈노트백업-238f5e29c0894adfb6c4d8e1a5b2c3d4?v=...
 3. 좌측 사이드바에서 **`Secrets and variables`** 클릭 (펼쳐짐) → **`Actions`** 하위 클릭
 4. 페이지 우측 상단 **녹색 `New repository secret` 버튼** 클릭
 
-### 7-3. 시크릿 3개 등록
+### 7-3. 필수 시크릿 3개 등록
 
 다음 표대로 **3번 반복**해서 등록합니다 — 한 번에 하나씩.
 
@@ -629,6 +630,19 @@ NOTION_TOKEN                  Updated now
 ```
 값은 표시되지 않고 `Updated [시간]`만 보임 = 정상.
 
+### 7-4. 선택: 대용량 첨부파일용 Google Drive fallback
+
+노션 무료 플랜의 파일당 5MB 제한 때문에 큰 동영상/PDF는 기본적으로 건너뜁니다. 그 파일까지 링크로 남기고 싶을 때만 Google Drive 폴더와 서비스 계정을 준비한 뒤 아래 2개 시크릿을 추가합니다.
+
+| Name | Secret 값 |
+|---|---|
+| `GOOGLE_DRIVE_FOLDER_ID` | 업로드할 Google Drive 폴더 ID |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Cloud 서비스 계정 JSON 전체 또는 base64 인코딩 값 |
+
+Drive 폴더는 서비스 계정 JSON 안의 `client_email` 주소에 편집 권한으로 공유되어 있어야 합니다.
+
+이 2개가 없으면 기존처럼 노션 업로드만 시도합니다.
+
 ### ❓ 막혔다면
 
 | 증상 | 원인 / 해결 |
@@ -636,7 +650,7 @@ NOTION_TOKEN                  Updated now
 | `Settings` 탭이 안 보임 | 다른 사람의 repo를 보고 있을 가능성. 1단계에서 만든 본인 fork URL 확인 |
 | `Secrets and variables` 메뉴 없음 | 좌측 사이드바 더 아래 스크롤. `Code and automation` 섹션 안에 있음 |
 | Add secret 후 목록에 없음 | 이름에 공백 또는 특수문자. `Update` 클릭해서 이름 다시 확인 |
-| 시크릿이 4개 이상 있음 | 이전에 다른 시크릿 만든 적 있음. 위 3개만 정확하면 추가 시크릿은 무시 가능 |
+| 시크릿이 4개 이상 있음 | 이전에 다른 시크릿을 만든 적 있거나 Drive fallback을 설정한 상태. 필수 3개만 정확하면 실행 가능 |
 
 ---
 
@@ -644,7 +658,7 @@ NOTION_TOKEN                  Updated now
 
 > 🕐 **백업 자체는 5분 ~ 4시간** (알림장 개수에 따라)
 >
-> 📍 **시작 전 확인**: 시크릿 3개 등록 완료 + 노션 DB에 통합 연결 완료
+> 📍 **시작 전 확인**: 필수 시크릿 3개 등록 완료 + 노션 DB에 통합 연결 완료
 
 드디어 마지막 단계. 워크플로를 직접 한 번 돌려서 백업을 시작합니다.
 
@@ -673,7 +687,7 @@ NOTION_TOKEN                  Updated now
 - 동영상/파일 첨부물 있으면 OK
 - 7개 대시보드 페이지(📊 통계 / 📅 추억 / 🥗 영양 / 📖 성장 스토리 / 🌟 마일스톤 / 🌱 관심사 / 💌 선생님께)가 함께 생성됨
 
-> 💡 **첫 실행은 왜 5분이 아니라 15분?**: GitHub Actions가 무료 Ollama 모델(`llama3.1:8b`, ~4.7GB)을 처음 다운로드하기 때문이에요. 두 번째 실행부터는 캐싱되어 ~30초 만에 시작합니다.
+> 💡 **첫 실행은 왜 5분이 아니라 15분?**: GitHub Actions가 무료 Ollama 모델(`gemma4:e4b`)을 처음 다운로드하기 때문이에요. 두 번째 실행부터는 캐싱되어 ~30초 만에 시작합니다.
 
 > ⚠️ **limit=3일 때 대시보드는 빈약합니다** — 알림장이 3개뿐이라 LLM이 "성장 스토리"·"마일스톤" 같은 페이지를 의미 있게 만들기 어려워요. **셋업 검증용**으로만 보시고, 다음 8-3에서 전체 백업 돌리면 대시보드도 풍부해집니다.
 
@@ -746,8 +760,8 @@ Notion mirror DONE: 342 new pages, 0 already existed, 0 failed
 
 로그 표기:
 - `img=N/M`: 사진 N개 업로드 성공 / M개 시도
-- `vid=N/M`: 동영상 (5MB 미만만)
-- `file=N/M`: PDF/엑셀 등 첨부 (5MB 미만만)
+- `vid=N/M`: 동영상 (노션 5MB 제한 초과분은 Drive fallback 설정 시 링크로 보존)
+- `file=N/M`: PDF/엑셀 등 첨부 (노션 5MB 제한 초과분은 Drive fallback 설정 시 링크로 보존)
 - 첨부물이 없으면 해당 항목 생략
 - ⚠️ 로그는 **자동 새로고침되지 않습니다**. 페이지를 새로고침(F5) 해야 최신 로그 확인 가능
 
@@ -964,20 +978,20 @@ Notion mirror: 350 total fetched, 342 already in DB (skip), 8 to publish
 
 ### 동영상이나 PDF·엑셀도 백업되나요?
 
-**5MB 미만**만 노션 페이지에 그대로 업로드됩니다. 5MB 이상은 자동 skip:
+**5MB 미만**은 노션 페이지에 그대로 업로드됩니다. 5MB 이상은 기본적으로 skip되지만, 7-4단계의 Google Drive fallback을 설정하면 Drive에 올린 뒤 노션 페이지에 링크로 남깁니다.
 
 | 첨부 종류 | 5MB 미만 | 5MB 이상 |
 |---|---|---|
 | 📷 사진 | ✅ 그대로 업로드 | ✅ 자동 압축 후 업로드 |
-| 🎬 동영상 | ✅ 그대로 업로드 (`동영상` 섹션) | ⚠️ skip (페이지에 표시 안 됨) |
-| 📎 PDF·엑셀 등 | ✅ 그대로 업로드 (`첨부 파일` 섹션) | ⚠️ skip |
+| 🎬 동영상 | ✅ 그대로 업로드 (`동영상` 섹션) | ✅ Drive fallback 설정 시 링크 보존 / 미설정 시 skip |
+| 📎 PDF·엑셀 등 | ✅ 그대로 업로드 (`첨부 파일` 섹션) | ✅ Drive fallback 설정 시 링크 보존 / 미설정 시 skip |
 
 워크플로 로그에서 skip된 게 있으면 다음과 같이 표시:
 ```
 WARNING video 5월_운동회.mp4 is 12340567 bytes > 5000000 cap; skipping (Notion free tier limit)
 ```
 
-**노션 유료 플랜**(Plus 이상)을 쓰면 파일당 5 GiB까지 가능. 무료 플랜으로도 본문 텍스트 + 사진은 손실 없이 다 저장됩니다.
+Drive fallback이 켜져 있으면 대신 `uploaded ... to Google Drive fallback` 로그가 보입니다. **노션 유료 플랜**(Plus 이상)은 파일당 5 GiB까지 가능하지만, 이 코드의 기본 안전 한도는 5MB라서 큰 파일을 노션에 직접 넣으려면 한도 값을 별도로 조정해야 합니다.
 
 ### 카카오 SSO(카카오 로그인) 계정도 되나요?
 
@@ -1061,8 +1075,9 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/redchup
 - Python 3.12 (+ `requests`, `Pillow`, `piexif`, `kiwipiepy`)
 - GitHub Actions (ubuntu-latest, 단일 job 6h hard-cap)
 - Notion API `2022-06-28` (`file_uploads` + `databases` + 100-children chunked PATCH)
+- Google Drive API (선택): Notion 5MB 제한 또는 업로드 실패 시 외부 링크 fallback
 - 키즈노트 비공식 API `/api/v1_2/children/<id>/reports/`
-- **Ollama** on the runner (`llama3.1:8b`, CPU-only) — 7개 대시보드 중 LLM 4개 생성에 사용. 모델·바이너리는 `actions/cache@v4`로 영구 캐싱
+- **Ollama** on the runner (`gemma4:e4b`, CPU-only) — 7개 대시보드 중 LLM 4개 생성에 사용. 모델·바이너리는 `actions/cache@v4`로 영구 캐싱
 
 **핵심 코드** ([`tools/kidsnote_fetch/`](tools/kidsnote_fetch/), 약 4000줄):
 - `fetch.py` — 키즈노트 API 호출 + 메인 로직 + dashboard 라우팅
@@ -1071,7 +1086,7 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/redchup
 
 **LLM 파이프라인**:
 - kiwipiepy → 알림장 본문에서 명사 추출, 제목 키워드 자동 생성
-- llama3.1:8b → 자녀 일기 1인칭 변환, 부모 편지, 4개 대시보드 (성장 스토리/마일스톤/관심사/감사 카드)
+- gemma4:e4b → 자녀 일기 1인칭 변환, 부모 편지, 4개 대시보드 (성장 스토리/마일스톤/관심사/감사 카드)
 - 후처리: `_strip_lead_meta` (메타 lead-in 자동 제거), `_strip_cjk` (한자 누수 차단, >20%면 reject), `_extract_after_final_label` (분석+본문 분리), few-shot 예시 누수 가드, 명사구/문장형 자동 분류
 
 **옵션 플래그**:
