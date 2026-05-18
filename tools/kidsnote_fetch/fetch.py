@@ -573,6 +573,103 @@ def _resolve_secret(env: dict[str, str], key: str) -> str:
     return os.environ.get(key, "") or env.get(key, "")
 
 
+def _plain_text(value: Any, *, max_chars: int | None = None) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    if max_chars == 0 and text:
+        return "(hidden)"
+    if max_chars is not None and len(text) > max_chars:
+        return text[:max_chars].rstrip() + "..."
+    return text
+
+
+def _title_quality_flags(title: str | None) -> list[str]:
+    if not title:
+        return ["gemma_failed"]
+    flags: list[str] = []
+    if re.search(r"[\u4e00-\u9fff]", title):
+        flags.append("contains_hanja")
+    if "원님" in title:
+        flags.append("suspicious_won_nim")
+    if re.search(r"\s*[\(（][^()（）]*(부모|선생님|교사|원감|원장|작성자)[^()（）]*[\)）]\s*$", title):
+        flags.append("author_parenthetical_suffix")
+    if any(token in title for token in ("제목:", "한줄요약:", "요약:", "본문 작성자", "댓글 작성자")):
+        flags.append("meta_text")
+    if len(title) > 90:
+        flags.append("too_long")
+    return flags
+
+
+def _run_title_quality_check(
+    sess: requests.Session,
+    reports: list[dict[str, Any]],
+    *,
+    source_chars: int,
+) -> int:
+    """Print Kidsnote source context + Gemma title samples without publishing."""
+    from notion_mirror import NotionMirror  # local module
+
+    if not reports:
+        _LOGGER.info("Title QA: no reports selected")
+        return 0
+
+    failures = 0
+    _LOGGER.info(
+        "Title QA: generating Gemma titles for %d report(s). No Notion pages will be created.",
+        len(reports),
+    )
+    for idx, report in enumerate(reports, 1):
+        report_id = int(report["id"])
+        detail = _fetch_report_detail(sess, report_id)
+        if detail is None:
+            _LOGGER.error("Title QA %d/%d: detail fetch failed id=%s", idx, len(reports), report_id)
+            failures += 1
+            continue
+        comments = _list_comments(sess, "reports", report_id) if detail.get("num_comments") else []
+        oneliner = NotionMirror._title_oneliner(detail, comments)
+        flags = _title_quality_flags(oneliner)
+        if flags:
+            failures += 1
+        fallback = NotionMirror._fallback_title_oneliner(detail, comments) if not oneliner else None
+        date_str = (
+            detail.get("date_written")
+            or (detail.get("modified") or "")[:10]
+            or (detail.get("created") or "")[:10]
+            or datetime.now().date().isoformat()
+        )
+        author_icon = NotionMirror._author_title_icon(detail)
+        final_oneliner = oneliner or fallback or f"알림장 #{report_id}"
+        final_title = f"[{date_str}] 알림장: {author_icon} {final_oneliner}"
+        author = NotionMirror._author_display(detail, emoji=False) or "작성자"
+        body = _plain_text(detail.get("content"), max_chars=source_chars)
+        print("")
+        print(f"===== TITLE QA {idx}/{len(reports)} id={report_id} date={date_str} =====")
+        print(f"author: {author}")
+        print(f"body: {body or '(본문 없음)'}")
+        if comments:
+            print(f"comments: {len(comments)}")
+            for cidx, comment in enumerate(comments, 1):
+                c_author = NotionMirror._author_display(comment, emoji=False) or "댓글 작성자"
+                c_body = _plain_text(comment.get("content"), max_chars=source_chars)
+                if not c_body and comment.get("emoticon_content"):
+                    c_body = "[이모티콘]"
+                print(f"- comment {cidx} author: {c_author}")
+                print(f"  comment {cidx}: {c_body}")
+        else:
+            print("comments: 0")
+        print(f"gemma_title: {oneliner or '(FAILED)'}")
+        if fallback:
+            print(f"fallback_title: {fallback}")
+        print(f"final_title: {final_title}")
+        print(f"quality_flags: {', '.join(flags) if flags else 'PASS'}")
+
+    if failures:
+        _LOGGER.warning("Title QA completed with %d report(s) needing review", failures)
+    else:
+        _LOGGER.info("Title QA completed: all sampled titles passed heuristic checks")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Personal Kidsnote fetcher - not part of the public package."
@@ -588,6 +685,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="Mirror each new report to a Notion database. "
                          "Reads NOTION_TOKEN + NOTION_DATABASE_ID from .env or "
                          "process env (whichever is set).")
+    ap.add_argument("--title-quality-only", action="store_true",
+                    help="Fetch selected reports, run Gemma title generation, and print "
+                         "source context + title samples without publishing to Notion.")
+    ap.add_argument("--title-source-chars", type=int, default=500,
+                    help="Max body/comment characters to show per Title QA sample. "
+                         "Use 0 to hide source text in CI logs.")
     ap.add_argument("--auth-mode", default="session-cookie-env",
                     choices=["session-cookie-env", "browser-cookie"],
                     help="session-cookie-env (default): reads KIDSNOTE_SESSION_COOKIE "
@@ -634,8 +737,8 @@ def main(argv: list[str] | None = None) -> int:
     # Sanity: at least one output channel must be active.
     if not args.no_local_save and args.backup_root is None:
         sys.exit("--backup-root is required unless --no-local-save is set.")
-    if args.no_local_save and not args.publish_to_notion:
-        sys.exit("--no-local-save is only useful with --publish-to-notion.")
+    if args.no_local_save and not (args.publish_to_notion or args.title_quality_only):
+        sys.exit("--no-local-save is only useful with --publish-to-notion or --title-quality-only.")
 
     env = _load_env_file(args.env_file) if args.env_file.exists() else {}
 
@@ -714,8 +817,18 @@ def main(argv: list[str] | None = None) -> int:
                      len(reports))
     elif args.limit:
         reports = reports[: args.limit]
+    elif args.title_quality_only:
+        reports = reports[:10]
+        _LOGGER.info("title-quality mode: no limit/monthly-sample set, kept newest 10 reports")
     _LOGGER.info("fetched %d reports for child id=%s",
                  len(reports), target.get("id"))
+
+    if args.title_quality_only:
+        return _run_title_quality_check(
+            sess,
+            reports,
+            source_chars=max(0, args.title_source_chars),
+        )
 
     # ---- local save (optional) -----
     total_new_files = 0

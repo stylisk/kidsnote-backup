@@ -217,6 +217,14 @@ class NotionMirrorTests(unittest.TestCase):
             "교사가 놀이 활동 공유",
         )
 
+    def test_title_quality_helpers_flag_suspicious_titles(self) -> None:
+        self.assertEqual(kidsnote_fetch._plain_text("<p>원문입니다</p>", max_chars=0), "(hidden)")
+        self.assertEqual(kidsnote_fetch._title_quality_flags("아빠가 원님으로 데리러 감"), ["suspicious_won_nim"])
+        self.assertIn(
+            "author_parenthetical_suffix",
+            kidsnote_fetch._title_quality_flags("등원차 이용 가능 여부 문의 (부모 정이담)"),
+        )
+
     def test_weather_callout_is_first_and_parent_weather_is_omitted(self) -> None:
         mirror = make_mirror()
         teacher_report = {

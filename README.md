@@ -778,7 +778,34 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 
 > 💡 **빠른 테스트 모드**: `llm_mode=auto`에서 `limit` 또는 `monthly_sample`을 쓰면 Ollama/Gemma 설치를 건너뜁니다. 알림장 제목은 원문 기반 fallback으로 만들어지고, LLM 대시보드는 이 테스트 실행에서는 건너뜁니다.
 
-> 🔍 **Gemma 제목까지 테스트하고 싶다면**: `llm_mode`를 `gemma`로 바꿔 실행하세요. 이 경우 첫 실행은 모델 다운로드 때문에 15~25분 이상 걸릴 수 있고, 이후에는 Actions cache가 맞으면 빨라집니다.
+### 8-2-1. 제목 품질만 테스트하기
+
+알림장 제목 품질을 확인할 때는 Notion에 페이지를 만들지 말고 **Gemma 제목 QA 모드**만 실행하세요.
+
+1. `Run workflow ▾` 폼에서:
+   - `title_quality_only`: **`true`**
+   - `limit`: **`5`** 또는 **`10`**
+   - `llm_mode`: **`auto`** 그대로
+   - `title_source_chars`: **`500`** (원문 일부를 로그에 표시)
+2. Actions 로그의 `Mirror Kidsnote → Notion` 스텝에서 `TITLE QA` 블록을 확인합니다.
+
+출력 예:
+
+```text
+===== TITLE QA 1/5 id=1367868900 date=2026-03-25 =====
+author: 부모 정이담 아빠
+body: 안녕하세요. 선생님! 오늘 이담이 하원은 제가 원으로 데리러 갈게요!
+comments: 1
+- comment 1 author: 선생님 물빛1반 교사
+  comment 1: 네~ 놀이하며 기다리겠습니다😊
+gemma_title: 아빠가 이담이를 어린이집으로 데리러 간다고 알림
+final_title: [2026-03-25] 알림장: 👨‍👩‍👧 아빠가 이담이를 어린이집으로 데리러 간다고 알림
+quality_flags: PASS
+```
+
+> ⚠️ `title_source_chars`가 1 이상이면 Actions 로그에 알림장 원문 일부가 표시됩니다. 공개 저장소에서 민감한 원문을 남기기 싫다면 `0`으로 설정하세요. 이 경우 제목은 나오지만 원문은 숨깁니다.
+
+> 🔍 제목 QA는 Gemma를 실제로 쓰므로 첫 실행은 모델 다운로드 때문에 15~25분 이상 걸릴 수 있습니다. 이후에는 Actions cache가 맞으면 빨라집니다.
 
 ### 8-3. 전체 백업 실행
 

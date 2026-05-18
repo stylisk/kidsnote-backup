@@ -35,6 +35,16 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      title_quality_only:
+        description: "Run Gemma title QA only; no Notion pages or media upload"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      title_source_chars:
+        description: "Title QA source characters per body/comment; 0 hides source text"
+        required: false
+        default: "500"
       llm_mode:
         description: "auto skips Gemma for limit/monthly_sample tests; choose gemma to force LLM"
         required: false
@@ -92,8 +102,9 @@ jobs:
           echo "workflow sha: ${GITHUB_SHA}"
           echo "ollama model: ${OLLAMA_MODEL}"
           echo "ollama cache key: ${OLLAMA_CACHE_KEY}"
+          echo "title quality only: ${{ inputs.title_quality_only || 'false' }}"
           echo "llm mode: ${{ inputs.llm_mode || 'auto' }}"
-          echo "use ollama: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}"
+          echo "use ollama: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}"
           echo "requirements:"
           nl -ba tools/kidsnote_fetch/requirements.txt
 
@@ -111,7 +122,7 @@ jobs:
       # gemma4:e4b is pinned by the preflight guard above so prompt behavior
       # and cache identity drift loudly instead of silently changing output.
       - name: Cache Ollama models
-        if: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
         id: ollama-cache
         uses: actions/cache@v4
         with:
@@ -119,7 +130,7 @@ jobs:
           key: ${{ env.OLLAMA_CACHE_KEY }}
 
       - name: Install Ollama + pull model
-        if: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
         run: |
           if ! command -v ollama >/dev/null 2>&1; then
             curl -fsSL https://ollama.com/install.sh | sh
@@ -138,7 +149,7 @@ jobs:
           ollama pull "${OLLAMA_MODEL}"
 
       - name: Skip Ollama for fast fallback test
-        if: ${{ github.event_name != 'schedule' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
+        if: ${{ github.event_name != 'schedule' && inputs.title_quality_only != 'true' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
         run: |
           echo "Skipping Ollama/Gemma setup for fast workflow test."
           echo "Report titles will use source-text fallback; LLM dashboards are skipped in this mode."
@@ -152,7 +163,7 @@ jobs:
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           # Tell notion_mirror.py where Ollama lives + which model to use
           OLLAMA_MODEL: ${{ env.OLLAMA_MODEL }}
-          USE_OLLAMA: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+          USE_OLLAMA: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
           PYTHONUNBUFFERED: "1"
         run: |
           set -eu
@@ -161,14 +172,19 @@ jobs:
           else
             unset OLLAMA_HOST
           fi
-          ARGS=( "--auth-mode" "session-cookie-env" "--publish-to-notion" "--no-local-save" )
+          if [ "${{ inputs.title_quality_only }}" = "true" ]; then
+            ARGS=( "--auth-mode" "session-cookie-env" "--title-quality-only" "--no-local-save" )
+            ARGS+=( "--title-source-chars" "${{ inputs.title_source_chars }}" )
+          else
+            ARGS=( "--auth-mode" "session-cookie-env" "--publish-to-notion" "--no-local-save" )
+          fi
           if [ -n "${{ inputs.limit }}" ]; then
             ARGS+=( "--limit" "${{ inputs.limit }}" )
           fi
           if [ "${{ inputs.monthly_sample }}" = "true" ]; then
             ARGS+=( "--monthly-sample" )
           fi
-          if [ "${{ inputs.force_refresh }}" = "true" ]; then
+          if [ "${{ inputs.force_refresh }}" = "true" ] && [ "${{ inputs.title_quality_only }}" != "true" ]; then
             ARGS+=( "--force-refresh" )
           fi
           python tools/kidsnote_fetch/fetch.py "${ARGS[@]}"
@@ -180,7 +196,11 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
-          for s in KIDSNOTE_SESSION_COOKIE NOTION_TOKEN NOTION_DATABASE_ID; do
+          REQUIRED=( KIDSNOTE_SESSION_COOKIE )
+          if [ "${{ inputs.title_quality_only }}" != "true" ]; then
+            REQUIRED+=( NOTION_TOKEN NOTION_DATABASE_ID )
+          fi
+          for s in "${REQUIRED[@]}"; do
             if [ -z "${!s:-}" ]; then
               echo "::error::repo secret '$s' is empty or unset"
             fi
