@@ -1207,8 +1207,8 @@ class NotionMirror:
             return None
         return out[:max_chars]
 
-    @staticmethod
-    def _clean_title_oneliner(text: str | None, *, max_chars: int = 90) -> str | None:
+    @classmethod
+    def _clean_title_oneliner(cls, text: str | None, *, max_chars: int = 90) -> str | None:
         """Extract one usable title line from a local LLM response.
 
         Gemma sometimes wraps the answer in markdown fences, a bare ``제목``
@@ -1239,10 +1239,26 @@ class NotionMirror:
         if not lines:
             return None
         title = lines[0]
+        title = cls._strip_title_author_suffix(title)
         title = re.sub(r"[。.!?]+$", "", title).strip()
         if len(title) < 3:
             return None
         return title[:max_chars].rstrip()
+
+    @staticmethod
+    def _strip_title_author_suffix(title: str) -> str:
+        """Remove LLM-added author/source tails such as ``(부모 정이담)``."""
+        suffix = re.search(r"\s*[\(（]([^()（）]{1,30})[\)）]\s*$", title)
+        if not suffix:
+            return title
+        inner = suffix.group(1).strip()
+        author_markers = (
+            "부모", "선생님", "교사", "원감", "원장", "아빠", "엄마",
+            "작성자", "본문 작성자", "댓글 작성자",
+        )
+        if any(marker in inner for marker in author_markers):
+            return title[:suffix.start()].rstrip()
+        return title
 
     @classmethod
     def _speaker_context(
@@ -1279,7 +1295,8 @@ class NotionMirror:
         full_prompt = (
             "키즈노트 알림장 제목을 한국어 한 줄로만 작성하세요. "
             "본문 작성자와 댓글 작성자를 구분하고, 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요. "
-            "'원'은 어린이집/기관일 수 있습니다. 이모지와 설명 없이 제목만 출력하세요.\n\n"
+            "'원'은 어린이집/기관일 수 있습니다. "
+            "작성자 이름/역할을 괄호로 반복하지 말고, 이모지와 설명 없이 제목만 출력하세요.\n\n"
             "[예시]\n"
             "본문 작성자: 부모 정이담 아빠\n"
             "본문: 안녕하세요. 선생님! 오늘 이담이 하원은 제가 원으로 데리러 갈게요!\n"
@@ -1292,7 +1309,8 @@ class NotionMirror:
         short_prompt = (
             "키즈노트 알림장을 한 줄 제목으로 요약하세요. "
             "한국어만 쓰고, 제목 문장 하나만 출력하세요. "
-            "본문 작성자와 댓글 작성자를 혼동하지 마세요.\n\n"
+            "본문 작성자와 댓글 작성자를 혼동하지 마세요. "
+            "작성자 이름/역할을 괄호로 덧붙이지 마세요.\n\n"
             f"{context[:900]}\n\n"
             "제목:"
         )

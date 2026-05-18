@@ -207,6 +207,16 @@ class NotionMirrorTests(unittest.TestCase):
         self.assertEqual(result["title"], "[2026-05-14] 알림장: 🏫 행사 안내를 전달함")
         self.assertNotIn("원감", result["title"])
 
+    def test_title_cleaner_removes_llm_author_parenthetical_suffix(self) -> None:
+        self.assertEqual(
+            NotionMirror._clean_title_oneliner("엄마가 등원차 이용 가능 여부 문의 (부모 정이담)"),
+            "엄마가 등원차 이용 가능 여부 문의",
+        )
+        self.assertEqual(
+            NotionMirror._clean_title_oneliner("교사가 놀이 활동 공유（선생님 물빛1반 교사）"),
+            "교사가 놀이 활동 공유",
+        )
+
     def test_weather_callout_is_first_and_parent_weather_is_omitted(self) -> None:
         mirror = make_mirror()
         teacher_report = {
