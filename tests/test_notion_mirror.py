@@ -348,6 +348,42 @@ class NotionMirrorTests(unittest.TestCase):
         self.assertEqual(title, "선생님이 꽃 관찰 활동을 전함")
         self.assertEqual(len(calls), 2)
 
+    def test_empty_generate_response_falls_back_to_chat_endpoint(self) -> None:
+        reset_ollama_state()
+        calls: list[str] = []
+
+        def fake_ollama_get(url: str, **kwargs) -> FakeResponse:
+            return FakeResponse({"version": "test"})
+
+        def fake_ollama_post(url: str, **kwargs) -> FakeResponse:
+            calls.append(url)
+            if url.endswith("/api/generate"):
+                return FakeResponse({"response": "", "done_reason": "stop", "eval_count": 0})
+            if url.endswith("/api/chat"):
+                return FakeResponse({"message": {"content": "선생님이 산책 소식을 전함"}})
+            raise AssertionError(f"unexpected Ollama POST {url}")
+
+        report = {
+            "id": 100,
+            "date_written": "2026-05-14",
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "오늘은 산책하며 바람을 느꼈습니다.",
+        }
+
+        with (
+            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:e4b"}),
+            patch.object(nm.requests, "get", side_effect=fake_ollama_get),
+            patch.object(nm.requests, "post", side_effect=fake_ollama_post),
+        ):
+            title = NotionMirror._title_oneliner(report, [])
+
+        self.assertEqual(title, "선생님이 산책 소식을 전함")
+        self.assertEqual(calls, [
+            "http://ollama.test/api/generate",
+            "http://ollama.test/api/chat",
+        ])
+
     def test_report_publish_falls_back_when_gemma_title_fails(self) -> None:
         report = {
             "id": 88,

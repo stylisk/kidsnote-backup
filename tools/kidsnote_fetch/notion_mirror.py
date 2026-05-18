@@ -1145,6 +1145,7 @@ class NotionMirror:
             if log_label:
                 _LOGGER.info("%s: Ollama is unavailable", log_label)
             return None
+        payload: dict[str, Any] = {}
         try:
             r = requests.post(
                 f"{cfg['host']}/api/generate",
@@ -1160,7 +1161,8 @@ class NotionMirror:
                 timeout=timeout,
             )
             r.raise_for_status()
-            out = (r.json().get("response") or "").strip()
+            payload = r.json()
+            out = (payload.get("response") or "").strip()
         except Exception as e:
             if log_label:
                 _LOGGER.info("%s: ollama call failed: %s", log_label, e)
@@ -1168,9 +1170,23 @@ class NotionMirror:
                 logging.getLogger(__name__).debug("ollama call failed: %s", e)
             return None
         if not out:
+            hint = cls._ollama_payload_hint(payload)
             if log_label:
-                _LOGGER.info("%s: ollama returned an empty response", log_label)
-            return None
+                _LOGGER.info(
+                    "%s: ollama generate returned an empty response%s; retrying chat endpoint",
+                    log_label,
+                    hint,
+                )
+            out = cls._ask_ollama_chat(
+                cfg,
+                prompt,
+                temperature=temperature,
+                num_predict=num_predict,
+                timeout=timeout,
+                log_label=log_label,
+            )
+            if not out:
+                return None
         # Drop wrapping ``"`` and leading dashes/asterisks
         out = out.strip().strip('"').strip("'").lstrip("- ").lstrip("* ").strip()
         # If the model produced analysis + a clean final block prefixed
@@ -1206,6 +1222,61 @@ class NotionMirror:
                 _LOGGER.info("%s: rejected too-short LLM output: %r", log_label, out)
             return None
         return out[:max_chars]
+
+    @staticmethod
+    def _ollama_payload_hint(payload: dict[str, Any]) -> str:
+        if not payload:
+            return ""
+        parts: list[str] = []
+        for key in ("done_reason", "error", "message", "eval_count", "prompt_eval_count"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                parts.append(f"{key}={value}")
+        return f" ({', '.join(parts)})" if parts else ""
+
+    @staticmethod
+    def _ask_ollama_chat(
+        cfg: dict[str, str],
+        prompt: str,
+        *,
+        temperature: float,
+        num_predict: int,
+        timeout: int,
+        log_label: str | None,
+    ) -> str | None:
+        try:
+            r = requests.post(
+                f"{cfg['host']}/api/chat",
+                json={
+                    "model": cfg["model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": num_predict,
+                    },
+                },
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            payload = r.json()
+            message = payload.get("message") or {}
+            out = (message.get("content") or "").strip()
+        except Exception as e:
+            if log_label:
+                _LOGGER.info("%s: ollama chat call failed: %s", log_label, e)
+            else:
+                logging.getLogger(__name__).debug("ollama chat call failed: %s", e)
+            return None
+        if not out:
+            if log_label:
+                _LOGGER.info(
+                    "%s: ollama chat returned an empty response%s",
+                    log_label,
+                    NotionMirror._ollama_payload_hint(payload),
+                )
+            return None
+        return out
 
     @classmethod
     def _clean_title_oneliner(cls, text: str | None, *, max_chars: int = 90) -> str | None:

@@ -665,6 +665,7 @@ def _run_title_quality_check(
 
     if failures:
         _LOGGER.warning("Title QA completed with %d report(s) needing review", failures)
+        return 1
     else:
         _LOGGER.info("Title QA completed: all sampled titles passed heuristic checks")
     return 0

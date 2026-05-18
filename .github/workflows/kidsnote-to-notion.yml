@@ -147,6 +147,42 @@ jobs:
           done
           # Pull model (cached after first run)
           ollama pull "${OLLAMA_MODEL}"
+          # Warm the model before the real title QA/backup request. This makes
+          # "model installed but returns empty text" fail with useful logs.
+          python - <<'PY' || { echo "::error::Ollama warmup failed"; tail -n 120 /tmp/ollama.log || true; exit 1; }
+          import json
+          import os
+          import sys
+          import time
+          import urllib.request
+
+          host = "http://localhost:11434"
+          model = os.environ["OLLAMA_MODEL"]
+          payload = {
+              "model": model,
+              "messages": [{"role": "user", "content": "한국어로 OK만 출력해."}],
+              "stream": False,
+              "options": {"temperature": 0, "num_predict": 8},
+          }
+          for attempt in range(1, 4):
+              req = urllib.request.Request(
+                  f"{host}/api/chat",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=180) as resp:
+                      body = json.loads(resp.read().decode("utf-8"))
+                  content = ((body.get("message") or {}).get("content") or "").strip()
+                  print(f"ollama warmup attempt {attempt}: {content or '(empty)'}")
+                  if content:
+                      sys.exit(0)
+              except Exception as exc:
+                  print(f"ollama warmup attempt {attempt} failed: {exc}")
+              time.sleep(2)
+          sys.exit(1)
+          PY
 
       - name: Skip Ollama for fast fallback test
         if: ${{ github.event_name != 'schedule' && inputs.title_quality_only != 'true' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
