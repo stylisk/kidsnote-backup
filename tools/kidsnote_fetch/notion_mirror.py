@@ -860,6 +860,15 @@ class NotionMirror:
         with_emoji, plain = labels.get(author_type, ("✏️ 작성자", "작성자"))
         return with_emoji if emoji else plain
 
+    @staticmethod
+    def _author_title_icon(item: dict[str, Any]) -> str:
+        author_type = (item.get("author") or {}).get("type") or ""
+        return {
+            "teacher": "👩‍🏫",
+            "parent": "👨‍👩‍👧",
+            "admin": "🏫",
+        }.get(author_type, "📝")
+
     @classmethod
     def _author_display(cls, item: dict[str, Any], *, emoji: bool) -> str:
         author = item.get("author") or {}
@@ -1745,7 +1754,7 @@ class NotionMirror:
                 f"Gemma4 title generation failed for report id={report_id}; "
                 "page was not created so the next run can retry"
             )
-        author_title = self._author_display(report, emoji=False) or "작성자"
+        author_title = self._author_title_icon(report)
         title = f"[{date_str}] 알림장: {author_title} {oneliner}"
 
         # Upload photos first so we can drop image blocks into the page body.

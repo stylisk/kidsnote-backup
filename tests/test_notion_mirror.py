@@ -179,7 +179,7 @@ class NotionMirrorTests(unittest.TestCase):
 
         self.assertEqual(
             result["title"],
-            "[2026-03-25] 알림장: 부모 정이담 아빠 아빠가 이담이를 어린이집으로 데리러 간다고 알림",
+            "[2026-03-25] 알림장: 👨‍👩‍👧 아빠가 이담이를 어린이집으로 데리러 간다고 알림",
         )
         page = mirror.session.pages[0]
         title_text = page["properties"]["Name"]["title"][0]["text"]["content"]
@@ -190,6 +190,22 @@ class NotionMirrorTests(unittest.TestCase):
         self.assertNotIn("yellow_background", callout_colors)
         self.assertNotIn("pink_background", callout_colors)
         self.assertFalse(callout_colors, "parent auto-weather should not be rendered")
+
+    def test_report_title_uses_author_type_icon_not_role_text(self) -> None:
+        report = {
+            "id": 77,
+            "date_written": "2026-05-14",
+            "author": {"type": "admin", "name": "물빛 원감"},
+            "author_name": "물빛 원감",
+            "content": "행사 안내입니다.",
+        }
+
+        with patch.object(NotionMirror, "_title_oneliner", return_value="행사 안내를 전달함"):
+            mirror = make_mirror()
+            result = mirror.publish_report(report, FakeKidsnoteSession())
+
+        self.assertEqual(result["title"], "[2026-05-14] 알림장: 🏫 행사 안내를 전달함")
+        self.assertNotIn("원감", result["title"])
 
     def test_weather_callout_is_first_and_parent_weather_is_omitted(self) -> None:
         mirror = make_mirror()
