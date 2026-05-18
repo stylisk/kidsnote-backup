@@ -35,6 +35,12 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      llm_mode:
+        description: "auto skips Gemma for limit/monthly_sample tests; choose gemma to force LLM"
+        required: false
+        default: "auto"
+        type: choice
+        options: ["auto", "gemma", "fast_fallback"]
   # Auto-resume: a multi-year backfill can take days of compute,
   # but a GitHub-hosted runner caps a single job at 6 hours. Without
   # cron, the user would have to manually re-trigger after every cap.
@@ -86,6 +92,8 @@ jobs:
           echo "workflow sha: ${GITHUB_SHA}"
           echo "ollama model: ${OLLAMA_MODEL}"
           echo "ollama cache key: ${OLLAMA_CACHE_KEY}"
+          echo "llm mode: ${{ inputs.llm_mode || 'auto' }}"
+          echo "use ollama: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}"
           echo "requirements:"
           nl -ba tools/kidsnote_fetch/requirements.txt
 
@@ -103,6 +111,7 @@ jobs:
       # gemma4:e4b is pinned by the preflight guard above so prompt behavior
       # and cache identity drift loudly instead of silently changing output.
       - name: Cache Ollama models
+        if: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
         id: ollama-cache
         uses: actions/cache@v4
         with:
@@ -110,6 +119,7 @@ jobs:
           key: ${{ env.OLLAMA_CACHE_KEY }}
 
       - name: Install Ollama + pull model
+        if: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
         run: |
           if ! command -v ollama >/dev/null 2>&1; then
             curl -fsSL https://ollama.com/install.sh | sh
@@ -127,6 +137,12 @@ jobs:
           # Pull model (cached after first run)
           ollama pull "${OLLAMA_MODEL}"
 
+      - name: Skip Ollama for fast fallback test
+        if: ${{ github.event_name != 'schedule' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
+        run: |
+          echo "Skipping Ollama/Gemma setup for fast workflow test."
+          echo "Report titles will use source-text fallback; LLM dashboards are skipped in this mode."
+
       - name: Mirror Kidsnote → Notion
         env:
           KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
@@ -135,11 +151,16 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           # Tell notion_mirror.py where Ollama lives + which model to use
-          OLLAMA_HOST: "http://localhost:11434"
           OLLAMA_MODEL: ${{ env.OLLAMA_MODEL }}
+          USE_OLLAMA: ${{ github.event_name == 'schedule' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
           PYTHONUNBUFFERED: "1"
         run: |
           set -eu
+          if [ "${USE_OLLAMA}" = "true" ]; then
+            export OLLAMA_HOST="http://localhost:11434"
+          else
+            unset OLLAMA_HOST
+          fi
           ARGS=( "--auth-mode" "session-cookie-env" "--publish-to-notion" "--no-local-save" )
           if [ -n "${{ inputs.limit }}" ]; then
             ARGS+=( "--limit" "${{ inputs.limit }}" )
