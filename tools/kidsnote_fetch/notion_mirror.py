@@ -90,24 +90,16 @@ def _get_ollama() -> dict[str, str] | None:
     return _OLLAMA_CONFIG
 
 _LOGGER = logging.getLogger(__name__)
-TITLE_FOCUS_VALUES = ("activity", "logistics", "health_sleep", "parent_request", "general")
 TITLE_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "title": {
             "type": "string",
-            "description": "Notion title oneliner in Korean, 55 characters or less.",
-        },
-        "evidence": {
-            "type": "string",
-            "description": "A short source phrase that supports the title.",
-        },
-        "focus": {
-            "type": "string",
-            "enum": list(TITLE_FOCUS_VALUES),
+            "description": "Notion title oneliner in Korean, ideally 30 characters or less.",
+            "maxLength": 35,
         },
     },
-    "required": ["title", "evidence", "focus"],
+    "required": ["title"],
     "additionalProperties": False,
 }
 
@@ -1517,11 +1509,9 @@ class NotionMirror:
             "너는 키즈노트 알림장 제목 생성기입니다. 아래 원문 전체를 읽고 "
             "Notion 제목 뒤에 붙을 한국어 한줄요약을 만드세요.\n\n"
             "본문과 댓글 원문 전체가 제공됩니다. 일부만 훑지 말고 끝까지 반영하세요.\n\n"
-            "출력 형식: 반드시 JSON 객체 하나만 출력하세요. Markdown, 설명, 코드블록 금지.\n"
-            "JSON 필드:\n"
-            '- "title": 55자 이내 한국어 제목\n'
-            '- "evidence": 제목 판단에 사용한 원문 핵심 구절\n'
-            '- "focus": activity, logistics, health_sleep, parent_request, general 중 하나\n\n'
+            "출력 형식: 반드시 JSON 객체 하나만 출력하세요. Markdown, 설명, 코드블록, 별표 금지.\n"
+            'JSON 필드는 "title" 하나만 사용하세요. evidence, focus, reason 같은 다른 필드는 쓰지 마세요.\n'
+            '"title"은 한글 기준 30자 이내를 목표로 아주 짧게 쓰세요. 자연스러우면 최대 35자까지 허용됩니다.\n\n'
             "판단 규칙:\n"
             "1. 본문 작성자와 댓글 작성자를 구분하세요.\n"
             "2. 댓글은 오래된 순서대로 제공됩니다. 대화 흐름을 시간순으로 이해하세요.\n"
@@ -1532,21 +1522,19 @@ class NotionMirror:
             "6. 작성자 이름/역할을 괄호로 반복하지 마세요.\n"
             "7. 이모지, 따옴표, 제목:, 요약: 같은 메타 문구를 title에 넣지 마세요.\n\n"
             "좋은 예:\n"
-            '{"title":"아빠가 이담이를 어린이집으로 데리러 간다고 알림",'
-            '"evidence":"오늘 이담이 하원은 제가 원으로 데리러 갈게요",'
-            '"focus":"logistics"}\n\n'
+            '{"title":"아빠가 이담이를 어린이집으로 데리러 감"}\n\n'
             "[키즈노트 원문]\n"
             f"{context}\n"
         )
 
     @classmethod
-    def _title_quality_flags(cls, title: str | None, *, evidence: str = "", focus: str = "") -> list[str]:
+    def _title_quality_flags(cls, title: str | None) -> list[str]:
         if not title:
             return ["missing_title"]
         flags: list[str] = []
         if len(title) < 5:
             flags.append("too_short")
-        if len(title) > 55:
+        if len(title) > 35:
             flags.append("too_long")
         if re.search(r"[\u4e00-\u9fff]", title):
             flags.append("contains_hanja")
@@ -1556,10 +1544,6 @@ class NotionMirror:
             flags.append("author_parenthetical_suffix")
         if any(token in title for token in ("제목:", "한줄요약:", "요약:", "본문 작성자", "댓글 작성자")):
             flags.append("meta_text")
-        if not evidence.strip():
-            flags.append("missing_evidence")
-        if focus not in TITLE_FOCUS_VALUES:
-            flags.append("invalid_focus")
         return flags
 
     @classmethod
@@ -1572,8 +1556,6 @@ class NotionMirror:
         if len(context.strip()) < 20:
             return {
                 "title": None,
-                "evidence": "",
-                "focus": "",
                 "flags": ["context_too_short"],
                 "metrics": {},
             }
@@ -1584,19 +1566,13 @@ class NotionMirror:
         if data is None:
             return {
                 "title": None,
-                "evidence": "",
-                "focus": "",
                 "flags": [str(metrics.get("error") or "json_parse_failed")],
                 "metrics": metrics,
             }
         title = cls._clean_title_oneliner(data.get("title"), max_chars=1000)
-        evidence = str(data.get("evidence") or "").strip()
-        focus = str(data.get("focus") or "").strip()
-        flags = cls._title_quality_flags(title, evidence=evidence, focus=focus)
+        flags = cls._title_quality_flags(title)
         return {
             "title": title,
-            "evidence": evidence,
-            "focus": focus,
             "flags": flags,
             "metrics": metrics,
         }

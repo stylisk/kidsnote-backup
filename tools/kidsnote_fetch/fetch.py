@@ -602,7 +602,7 @@ def _preview_text_lines(label: str, value: Any, *, max_chars: int) -> list[str]:
 
 def _title_quality_flags(title: str | None) -> list[str]:
     from notion_mirror import NotionMirror  # local module
-    return NotionMirror._title_quality_flags(title, evidence="test", focus="general")
+    return NotionMirror._title_quality_flags(title)
 
 
 def _run_title_quality_check(
@@ -677,14 +677,15 @@ def _run_title_quality_check(
         print(f"prompt_eval_count: {metrics.get('prompt_eval_count')}")
         print(f"eval_count: {metrics.get('eval_count')}")
         print(f"done_reason: {metrics.get('done_reason')}")
-        print(f"gemma_title: {title_details.get('title') or '(FAILED)'}")
+        gemma_title = str(title_details.get("title") or "")
+        print(f"gemma_title: {gemma_title or '(FAILED)'}")
+        if gemma_title:
+            print(f"gemma_title_chars: {len(gemma_title)}")
         if flags:
             print(f"gemma_error: {metrics.get('error') or ', '.join(flags)}")
             raw = str(metrics.get("raw") or "").strip()
             if raw:
                 print(f"raw_response_head: {_plain_text(raw, max_chars=300)}")
-        print(f"evidence: {title_details.get('evidence') or ''}")
-        print(f"focus: {title_details.get('focus') or ''}")
         if fallback:
             print(f"fallback_title: {fallback}")
         print(f"final_title: {final_title}")

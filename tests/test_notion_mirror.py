@@ -163,8 +163,6 @@ class NotionMirrorTests(unittest.TestCase):
             return FakeResponse({
                 "message": {"content": json.dumps({
                     "title": "아빠가 이담이를 어린이집으로 데리러 간다고 알림",
-                    "evidence": "오늘 이담이 하원은 제가 원으로 데리러 갈게요",
-                    "focus": "logistics",
                 }, ensure_ascii=False)},
                 "done_reason": "stop",
                 "prompt_eval_count": 321,
@@ -408,14 +406,15 @@ class NotionMirrorTests(unittest.TestCase):
         def fake_ollama_post(url: str, **kwargs) -> FakeResponse:
             self.assertEqual(url, "http://ollama.test/api/chat")
             body = kwargs["json"]
-            self.assertEqual(body["format"]["required"], ["title", "evidence", "focus"])
+            self.assertEqual(body["format"]["required"], ["title"])
+            self.assertEqual(body["format"]["properties"]["title"]["maxLength"], 35)
             self.assertEqual(body["messages"][0]["role"], "user")
             self.assertIn("본문과 댓글 원문 전체", body["messages"][0]["content"])
+            self.assertIn("30자 이내를 목표", body["messages"][0]["content"])
+            self.assertIn("최대 35자까지 허용", body["messages"][0]["content"])
             return FakeResponse({
                 "message": {"content": json.dumps({
                     "title": "선생님이 꽃 관찰 활동을 전함",
-                    "evidence": "오늘은 꽃을 관찰하며 봄을 느껴보았습니다",
-                    "focus": "activity",
                 }, ensure_ascii=False)},
                 "done_reason": "stop",
                 "prompt_eval_count": 120,
@@ -474,21 +473,15 @@ class NotionMirrorTests(unittest.TestCase):
         self.assertEqual(details["metrics"]["error"], "json_parse_failed")
         self.assertEqual(details["metrics"]["raw"], "선생님이 산책 소식을 전함")
 
-    def test_title_json_over_length_is_rejected(self) -> None:
-        details = {
-            "title": "아주 긴 제목입니다" * 10,
-            "evidence": "원문",
-            "focus": "activity",
-        }
+    def test_title_length_allows_35_chars_without_truncating(self) -> None:
+        accepted = "가" * 35
+        rejected = "가" * 36
 
-        title = NotionMirror._clean_title_oneliner(details["title"], max_chars=1000)
-        flags = NotionMirror._title_quality_flags(
-            title,
-            evidence=details["evidence"],
-            focus=details["focus"],
-        )
+        title = NotionMirror._clean_title_oneliner(accepted, max_chars=1000)
 
-        self.assertIn("too_long", flags)
+        self.assertEqual(title, accepted)
+        self.assertEqual(NotionMirror._title_quality_flags(title), [])
+        self.assertIn("too_long", NotionMirror._title_quality_flags(rejected))
 
     def test_report_publish_falls_back_when_gemma_title_fails(self) -> None:
         report = {

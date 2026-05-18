@@ -805,8 +805,7 @@ prompt_eval_count: 321
 eval_count: 24
 done_reason: stop
 gemma_title: 아빠가 이담이를 어린이집으로 데리러 간다고 알림
-evidence: 오늘 이담이 하원은 제가 원으로 데리러 갈게요
-focus: logistics
+gemma_title_chars: 26
 final_title: [2026-03-25] 알림장: 👨‍👩‍👧 아빠가 이담이를 어린이집으로 데리러 간다고 알림
 quality_flags: PASS
 ```
@@ -814,6 +813,8 @@ quality_flags: PASS
 댓글은 키즈노트 API가 최신순으로 내려줘도 QA와 Gemma 프롬프트에서는 **오래된 순서**로 재정렬됩니다. 그래서 부모 질문 → 선생님 답변 → 부모 후속 답변 같은 흐름을 시간순으로 보고 제목을 만들 수 있습니다.
 
 본문이 길면 QA 로그는 사람이 확인하기 좋게 `body_head`와 `body_tail`을 보여주지만, Gemma 프롬프트에는 본문과 댓글 원문 전체를 전달합니다. `gemma_context_chars` 값으로 실제 전달한 전체 맥락 길이를 확인할 수 있습니다.
+
+Gemma 응답은 `title` 하나만 받습니다. 프롬프트는 30자 이내를 목표로 요청하고, 후처리 검증은 35자까지 허용합니다. 35자를 넘으면 제목을 자르지 않고 `too_long`으로 표시합니다.
 
 `quality_flags`가 `PASS`가 아니거나 Gemma 제목이 비어 있으면 QA run은 실패 상태로 끝납니다. 이때 `gemma_error`에 실패 이유가 표시되고, Ollama가 JSON이 아닌 응답을 반환한 경우에는 `raw_response_head`로 응답 앞부분을 함께 보여줍니다. `prompt_eval_count`, `eval_count`, `done_reason`으로 Gemma가 실제로 컨텍스트를 처리했는지도 확인할 수 있습니다.
 
