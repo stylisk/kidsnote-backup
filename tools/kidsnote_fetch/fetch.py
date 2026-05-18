@@ -53,10 +53,9 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 )
 
-# Common candidate keys for the image URL inside a report's attachment object.
-# Kidsnote has used "original" historically; the others are fallbacks in case
-# the API has evolved.
-IMAGE_URL_KEYS = ("original", "url", "src", "high", "high_resize", "large_resize")
+# Media backup must preserve Kidsnote's original upload. Do not fall back to
+# resized/high variants; if Kidsnote stops returning `original`, surface it.
+IMAGE_URL_KEYS = ("original",)
 ATTACH_LIST_KEYS = ("attached_images", "attached_pictures", "pictures", "images")
 TEXT_KEYS = ("content", "body", "report")
 # Video attachments — usually a single object (or None) on each report.
@@ -86,6 +85,91 @@ DASHBOARD_RESERVE_SEC = 120  # keep 2 min for fast dashboards after publish loop
 def _remaining_budget() -> float:
     """Seconds remaining in the workflow's self-imposed time budget."""
     return TIME_BUDGET_SEC - (time.monotonic() - _START_TIME)
+
+
+def _publish_batch_with_resume(
+    *,
+    items: list[dict[str, Any]],
+    publish_fn: Any,
+    kind_label: str,
+    sess: requests.Session,
+    skip_ids: set[int],
+    publish_results: list[dict[str, Any]],
+    remaining_budget_fn: Any = _remaining_budget,
+    force_refresh: bool = False,
+    page_map: dict[int, str] | None = None,
+    mirror: Any = None,
+    dashboard_reserve_sec: int = DASHBOARD_RESERVE_SEC,
+    prefiltered: bool = False,
+    already_count: int = 0,
+    fetched_count: int | None = None,
+) -> dict[str, int | bool]:
+    """Publish a deduped batch and stop cleanly when the run budget is low."""
+    if prefiltered:
+        to_pub = items
+        already = already_count
+        fetched = fetched_count if fetched_count is not None else already + len(to_pub)
+    else:
+        to_pub = [x for x in items if int(x.get("id", 0)) not in skip_ids]
+        already = len(items) - len(to_pub)
+        fetched = len(items)
+    total = len(to_pub)
+    _LOGGER.info(
+        "%s mirror: %d total fetched, %d already in DB (skip), %d to publish",
+        kind_label, fetched, already, total,
+    )
+    pub = 0
+    fail = 0
+    stopped_early = False
+    for idx, x in enumerate(to_pub, start=1):
+        if remaining_budget_fn() < dashboard_reserve_sec:
+            _LOGGER.warning(
+                "%s mirror: time budget reached at %d/%d, stopping early. "
+                "Next cron run will resume via dedup.",
+                kind_label, idx - 1, total,
+            )
+            stopped_early = True
+            break
+        xid = int(x.get("id", 0))
+        pct = (idx / total * 100) if total else 100.0
+        try:
+            if force_refresh and page_map is not None and mirror is not None and xid in page_map:
+                mirror.archive_by_report_id(xid, page_map)
+            res = publish_fn(x, sess)
+            publish_results.append(res)
+            pub += 1
+            img_tot = res.get("images_uploaded", 0) + res.get("images_failed", 0)
+            parts = []
+            if img_tot:
+                parts.append(f"img={res['images_uploaded']}/{img_tot}")
+            vid_tot = res.get("videos_uploaded", 0) + res.get("videos_failed", 0)
+            if vid_tot:
+                parts.append(f"vid={res['videos_uploaded']}/{vid_tot}")
+            file_tot = res.get("files_uploaded", 0) + res.get("files_failed", 0)
+            if file_tot:
+                parts.append(f"file={res['files_uploaded']}/{file_tot}")
+            attach_str = (" " + " ".join(parts)) if parts else ""
+            _LOGGER.info(
+                "%s %5.1f%% (%d/%d) | Notion +1 id=%d%s",
+                kind_label, pct, idx, total, xid, attach_str,
+            )
+        except Exception as e:
+            fail += 1
+            _LOGGER.warning(
+                "%s %5.1f%% (%d/%d) | Notion FAILED id=%d: %s",
+                kind_label, pct, idx, total, xid, e,
+            )
+    _LOGGER.info(
+        "%s mirror DONE: %d new pages, %d already existed, %d failed",
+        kind_label, pub, already, fail,
+    )
+    return {
+        "published": pub,
+        "already": already,
+        "failed": fail,
+        "stopped_early": stopped_early,
+        "to_publish": total,
+    }
 
 
 def _safe_url(url: str) -> str:
@@ -211,8 +295,9 @@ def _fetch_report_detail(
     """Single-report endpoint returns ~15 extra `life record` fields
     (meal/sleep/bowel/temperature/mood/etc) that the list endpoint omits.
 
-    Confirmed live: ``GET /api/v1_2/reports/<id>/``. Returns ``None`` on error
-    so the caller can fall back to the summary record from the list call.
+    Confirmed live: ``GET /api/v1_2/reports/<id>/``. Returns ``None`` on error;
+    callers that create Notion pages should treat that as retryable failure
+    instead of publishing an incomplete page.
     """
     try:
         r = sess.get(f"{API}/reports/{report_id}/", timeout=30)
@@ -426,7 +511,7 @@ def _download_attachment(
     keep_original_name: bool = False,
 ) -> bool:
     """Download one attachment (image / video / file). Returns True if a new
-    file landed on disk, False if skipped (no URL) or already cached.
+    file landed on disk, False if no write was needed or possible.
 
     `stem` is the base filename without suffix (e.g. ``image_001`` / ``video_001``).
     `default_suffix` is used when neither the URL path nor `original_file_name`
@@ -444,6 +529,7 @@ def _download_attachment(
     else:
         return False
     if not url:
+        _LOGGER.warning("attachment metadata has no original URL in %s: %s", folder.name, obj)
         return False
 
     # Pick a suffix: original_file_name > URL path > default.
@@ -531,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--force-refresh", action="store_true",
                     help="Re-publish every report by archiving its existing "
                          "Notion page first (bypasses Report-ID dedup). Use "
-                         "after prompt/LLM changes so old callouts get "
+                         "after title prompt or page-structure changes so old pages get "
                          "regenerated. Sentinel dashboard pages are never "
                          "touched by this — they're always replaced anyway.")
     ap.add_argument("--dump-raw", action="store_true",
@@ -631,21 +717,6 @@ def main(argv: list[str] | None = None) -> int:
     _LOGGER.info("fetched %d reports for child id=%s",
                  len(reports), target.get("id"))
 
-    # Enrich reports with detail API in one pass — both the publish step and
-    # the dashboard stats need fields that only the detail endpoint exposes
-    # (meal_status / sleep_hour / weather / food / sleep / nursing / bowel).
-    # 1 extra HTTP call per report, but skipping it would force two passes.
-    if mirror is not None and reports:
-        _LOGGER.info("enriching %d reports with detail API...", len(reports))
-        enriched: list[dict[str, Any]] = []
-        for i, r in enumerate(reports, 1):
-            d = _fetch_report_detail(sess, int(r["id"])) or r
-            enriched.append(d)
-            if i % 5 == 0 or i == len(reports):
-                _LOGGER.info("  detail enrich %d/%d done", i, len(reports))
-        reports = enriched
-        _LOGGER.info("detail enrich complete")
-
     # ---- local save (optional) -----
     total_new_files = 0
     if not args.no_local_save:
@@ -666,72 +737,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Accumulator for attachment counts (across all kinds).
     publish_results: list[dict[str, Any]] = []
-
-    # ---- helper: publish a batch of items via the given publish method ----
-    def _publish_batch(
-        items: list[dict[str, Any]],
-        publish_fn: Any,
-        kind_label: str,
-    ) -> None:
-        # `publish_fn` is mirror.publish_notice / publish_album / publish_menu.
-        # Dedup against the same skip_ids set (Report ID is shared column).
-        to_pub = [x for x in items if int(x.get("id", 0)) not in skip_ids]
-        already = len(items) - len(to_pub)
-        total = len(to_pub)
-        _LOGGER.info(
-            "%s mirror: %d total fetched, %d already in DB (skip), %d to publish",
-            kind_label, len(items), already, total,
-        )
-        pub = 0
-        fail = 0
-        stopped_early = False
-        for idx, x in enumerate(to_pub, start=1):
-            # Graceful exit before the 6h hard cap so cron auto-resume
-            # has time to write the dashboards instead of being SIGTERM'd
-            # mid-page-create.
-            if _remaining_budget() < DASHBOARD_RESERVE_SEC:
-                _LOGGER.warning(
-                    "%s mirror: time budget reached at %d/%d, stopping early. "
-                    "Next cron run will resume via dedup.",
-                    kind_label, idx - 1, total,
-                )
-                stopped_early = True
-                break
-            xid = int(x.get("id", 0))
-            pct = (idx / total * 100) if total else 100.0
-            try:
-                # --force-refresh: archive prior version (if any) so the
-                # new prompt-style callouts replace the old ones.
-                if args.force_refresh and xid in page_map:
-                    mirror.archive_by_report_id(xid, page_map)
-                res = publish_fn(x, sess)
-                publish_results.append(res)
-                pub += 1
-                img_tot = res.get("images_uploaded", 0) + res.get("images_failed", 0)
-                parts = []
-                if img_tot:
-                    parts.append(f"img={res['images_uploaded']}/{img_tot}")
-                vid_tot = res.get("videos_uploaded", 0) + res.get("videos_failed", 0)
-                if vid_tot:
-                    parts.append(f"vid={res['videos_uploaded']}/{vid_tot}")
-                file_tot = res.get("files_uploaded", 0) + res.get("files_failed", 0)
-                if file_tot:
-                    parts.append(f"file={res['files_uploaded']}/{file_tot}")
-                attach_str = (" " + " ".join(parts)) if parts else ""
-                _LOGGER.info(
-                    "%s %5.1f%% (%d/%d) | Notion +1 id=%d%s",
-                    kind_label, pct, idx, total, xid, attach_str,
-                )
-            except Exception as e:
-                fail += 1
-                _LOGGER.warning(
-                    "%s %5.1f%% (%d/%d) | Notion FAILED id=%d: %s",
-                    kind_label, pct, idx, total, xid, e,
-                )
-        _LOGGER.info(
-            "%s mirror DONE: %d new pages, %d already existed, %d failed",
-            kind_label, pub, already, fail,
-        )
+    report_publish_results: list[dict[str, Any]] = []
 
     # ---- Find center_id once for notice + menu sync ----
     enr = target.get("enrollment")
@@ -759,14 +765,48 @@ def main(argv: list[str] | None = None) -> int:
             _LOGGER.info("pre-loaded %d daily menus (matching by date_menu)",
                          len(menus_for_match))
         except Exception as e:
-            _LOGGER.warning("menu pre-fetch failed: %s", e)
+            _LOGGER.error(
+                "menu pre-fetch failed: %s. Stopping before report publish so menus are not silently omitted.",
+                e,
+            )
+            return 1
 
     matched_menu_ids: set[int] = set()
 
     # ---- Notion mirror: alimnota reports (already enriched above) -----
     notices: list[dict[str, Any]] = []
     albums: list[dict[str, Any]] = []
+    report_batch = {
+        "published": 0,
+        "already": 0,
+        "failed": 0,
+        "stopped_early": False,
+        "to_publish": 0,
+    }
+    report_backlog_complete = mirror is None
     if mirror is not None:
+        report_backlog = [r for r in reports if int(r.get("id", 0)) not in skip_ids]
+        report_already = len(reports) - len(report_backlog)
+        if report_backlog:
+            _LOGGER.info(
+                "enriching %d report(s) that still need publishing with detail API...",
+                len(report_backlog),
+            )
+        report_details_to_publish: list[dict[str, Any]] = []
+        for i, r in enumerate(report_backlog, 1):
+            d = _fetch_report_detail(sess, int(r["id"]))
+            if d is None:
+                _LOGGER.error(
+                    "Report detail fetch failed for id=%s; stopping before page creation "
+                    "so the next cron run can retry with complete weather/life-record data.",
+                    r.get("id"),
+                )
+                return 1
+            report_details_to_publish.append(d)
+            if i % 5 == 0 or i == len(report_backlog):
+                _LOGGER.info("  detail enrich %d/%d publish-target report(s) done",
+                             i, len(report_backlog))
+
         def _publish_report(detail: dict[str, Any], sess_: requests.Session) -> dict[str, Any]:
             # Same-day menu is only embedded into TEACHER posts (alimnota
             # from the daycare). Parent-written entries describe what the
@@ -781,7 +821,34 @@ def main(argv: list[str] | None = None) -> int:
                     matched_menu_ids.add(int(attached_menu["id"]))
             return mirror.publish_report(detail, sess_, attached_menu=attached_menu)
 
-        _publish_batch(reports, _publish_report, "Report")
+        report_batch = _publish_batch_with_resume(
+            items=report_details_to_publish,
+            publish_fn=_publish_report,
+            kind_label="Report",
+            sess=sess,
+            skip_ids=skip_ids,
+            publish_results=publish_results,
+            force_refresh=args.force_refresh,
+            page_map=page_map,
+            mirror=mirror,
+            prefiltered=True,
+            already_count=report_already,
+            fetched_count=len(reports),
+        )
+        report_publish_results = publish_results[:]
+        if report_batch["stopped_early"]:
+            _LOGGER.warning(
+                "Report backlog paused by time budget; stopping before notices, albums, and dashboards. "
+                "The next cron run will resume from Notion Report ID dedup."
+            )
+            return 0
+        if report_batch["failed"]:
+            _LOGGER.error(
+                "Report backup had %d failed page(s); stopping before later phases so failed reports retry.",
+                report_batch["failed"],
+            )
+            return 1
+        report_backlog_complete = True
 
     # ---- Notion mirror: notices (center-wide) -----
     if mirror is not None and not args.no_notices and center_id:
@@ -790,9 +857,26 @@ def main(argv: list[str] | None = None) -> int:
             if args.limit:
                 notices = notices[: args.limit]
             _LOGGER.info("fetched %d notices for center id=%s", len(notices), center_id)
-            _publish_batch(notices, mirror.publish_notice, "Notice")
+            notice_batch = _publish_batch_with_resume(
+                items=notices,
+                publish_fn=mirror.publish_notice,
+                kind_label="Notice",
+                sess=sess,
+                skip_ids=skip_ids,
+                publish_results=publish_results,
+                force_refresh=args.force_refresh,
+                page_map=page_map,
+                mirror=mirror,
+            )
+            if notice_batch["stopped_early"]:
+                _LOGGER.warning("Notice backlog paused by time budget; dashboards deferred.")
+                return 0
+            if notice_batch["failed"]:
+                _LOGGER.error("Notice backup had %d failed page(s)", notice_batch["failed"])
+                return 1
         except Exception as e:
-            _LOGGER.warning("notice fetch failed: %s", e)
+            _LOGGER.error("notice fetch failed: %s", e)
+            return 1
 
     # ---- Notion mirror: albums (per child) -----
     if mirror is not None and not args.no_albums:
@@ -801,9 +885,26 @@ def main(argv: list[str] | None = None) -> int:
             if args.limit:
                 albums = albums[: args.limit]
             _LOGGER.info("fetched %d albums for child id=%s", len(albums), target["id"])
-            _publish_batch(albums, mirror.publish_album, "Album")
+            album_batch = _publish_batch_with_resume(
+                items=albums,
+                publish_fn=mirror.publish_album,
+                kind_label="Album",
+                sess=sess,
+                skip_ids=skip_ids,
+                publish_results=publish_results,
+                force_refresh=args.force_refresh,
+                page_map=page_map,
+                mirror=mirror,
+            )
+            if album_batch["stopped_early"]:
+                _LOGGER.warning("Album backlog paused by time budget; dashboards deferred.")
+                return 0
+            if album_batch["failed"]:
+                _LOGGER.error("Album backup had %d failed page(s)", album_batch["failed"])
+                return 1
         except Exception as e:
-            _LOGGER.warning("album fetch failed: %s", e)
+            _LOGGER.error("album fetch failed: %s", e)
+            return 1
 
     # ---- Daily menus are NOT published as standalone pages.
     # ---- Same-day menus are inlined into the matching report (above).
@@ -814,9 +915,24 @@ def main(argv: list[str] | None = None) -> int:
             len(menus_fetched), len(matched_menu_ids), len(menus_fetched) - len(matched_menu_ids),
         )
 
+    dashboard_reports: list[dict[str, Any]] = []
+    if mirror is not None and reports and report_backlog_complete:
+        if _remaining_budget() < 900:
+            _LOGGER.warning(
+                "Dashboards deferred: only %.0fs left after backup phases; next cron run will retry.",
+                _remaining_budget(),
+            )
+        else:
+            _LOGGER.info("enriching %d reports with detail API for dashboards...", len(reports))
+            for i, r in enumerate(reports, 1):
+                d = _fetch_report_detail(sess, int(r["id"])) or r
+                dashboard_reports.append(d)
+                if i % 10 == 0 or i == len(reports):
+                    _LOGGER.info("  dashboard detail enrich %d/%d done", i, len(reports))
+
     # ---- 📊 Stats dashboard ----
-    if mirror is not None and reports:
-        _LOGGER.info("📊 Dashboard: computing stats from %d reports...", len(reports))
+    if mirror is not None and dashboard_reports:
+        _LOGGER.info("📊 Dashboard: computing stats from %d reports...", len(dashboard_reports))
         from collections import Counter
         from notion_mirror import NotionMirror
 
@@ -827,7 +943,7 @@ def main(argv: list[str] | None = None) -> int:
         meal_counter: Counter[str] = Counter()
         weather_counter: Counter[str] = Counter()
 
-        for r in reports:
+        for r in dashboard_reports:
             for c in NotionMirror._classify_categories(r.get("content") or ""):
                 cat_counter[c] += 1
             ym = (r.get("date_written") or "")[:7]
@@ -851,7 +967,7 @@ def main(argv: list[str] | None = None) -> int:
         }
 
         stats = {
-            "reports_total": len(reports),
+            "reports_total": len(dashboard_reports),
             "notices_total": len(notices),
             "albums_total": len(albums),
             "menus_total": len(menus_fetched),
@@ -866,12 +982,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             mirror.publish_dashboard(stats)
             _LOGGER.info("📊 Dashboard updated (reports=%d, categories=%d, months=%d)",
-                         len(reports), len(cat_counter), len(monthly_counter))
+                         len(dashboard_reports), len(cat_counter), len(monthly_counter))
         except Exception as e:
             _LOGGER.warning("dashboard publish failed: %s", e)
 
     # ---- 📅 오늘의 추억 (Phase 2) ----
-    if mirror is not None:
+    if mirror is not None and dashboard_reports:
         from datetime import datetime as _dt
         today = _dt.now().date()
         today_md = today.strftime("%m-%d")
@@ -934,7 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
             _LOGGER.warning("memories publish failed: %s", e)
 
     # ---- 🥗 영양 분석 (Phase 3) ----
-    if mirror is not None and menus_fetched:
+    if mirror is not None and dashboard_reports and menus_fetched:
         _LOGGER.info("🥗 Nutrition: analyzing %d menus...", len(menus_fetched))
         from collections import Counter as _Counter, defaultdict as _defaultdict
         from notion_mirror import NUTRITION_GROUPS
@@ -978,31 +1094,31 @@ def main(argv: list[str] | None = None) -> int:
             _LOGGER.warning("nutrition publish failed: %s", e)
 
     # ---- 📖 매월 성장 스토리 / 🌟 마일스톤 / 🌱 분기 관심사 / 💌 감사 카드
-    # ---- (LLM-driven; auto-skipped when Ollama isn't reachable) ----
+    # ---- (LLM-driven dashboards; auto-skipped when Ollama isn't reachable) ----
     #
     # Cron auto-resume: regenerating the 4 LLM dashboards costs ~1.5 hours
     # of Ollama time. With the workflow on a 4-hour cron schedule we don't
     # want to burn that on every run; only do it when there's actually new
     # content to incorporate, or when the user explicitly asked for a
     # refresh. Idle cron runs (no new alimnotas) finish in ~1 min.
-    new_pages_published = len(publish_results)
+    new_pages_published = len(report_publish_results)
     should_run_llm_dashboards = (
-        mirror is not None and reports
+        mirror is not None and dashboard_reports
         and (new_pages_published > 0 or args.force_refresh)
     )
-    if mirror is not None and reports and not should_run_llm_dashboards:
+    if mirror is not None and dashboard_reports and not should_run_llm_dashboards:
         _LOGGER.info(
             "LLM dashboards: skipping (no new alimnotas added this run; "
             "set force_refresh=true to force regeneration)"
         )
     if should_run_llm_dashboards:
-        cname = (reports[0].get("child_name") or "") if reports else ""
+        cname = (dashboard_reports[0].get("child_name") or "") if dashboard_reports else ""
 
         # Group by month + quarter
         from collections import defaultdict
         by_month: dict[str, list[dict[str, Any]]] = defaultdict(list)
         by_quarter: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for r in reports:
+        for r in dashboard_reports:
             d = r.get("date_written") or ""
             if len(d) < 7:
                 continue
@@ -1042,9 +1158,9 @@ def main(argv: list[str] | None = None) -> int:
                 _remaining_budget(),
             )
         else:
-            _LOGGER.info("🌟 Milestones: scanning %d reports...", len(reports))
+            _LOGGER.info("🌟 Milestones: scanning %d reports...", len(dashboard_reports))
             try:
-                res = mirror.publish_milestones(reports, cname)
+                res = mirror.publish_milestones(dashboard_reports, cname)
                 _LOGGER.info("🌟 Milestones page: %s",
                              "OK" if res else "FAILED (see WARNING above for cause)")
             except Exception as e:
@@ -1072,7 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _LOGGER.info("💌 Teacher thanks: composing letter...")
             try:
-                res = mirror.publish_teacher_thanks(reports, cname)
+                res = mirror.publish_teacher_thanks(dashboard_reports, cname)
                 _LOGGER.info("💌 Teacher thanks page: %s",
                              "OK" if res else "FAILED (see WARNING above; or no teacher posts)")
             except Exception as e:

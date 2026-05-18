@@ -5,8 +5,8 @@ Designed for the GitHub Actions workflow at
 
     Kidsnote /api/v1_2/.../reports/   →   Notion pages (one per report)
 
-Each Notion page holds the teacher's raw alimnota text + the original
-Kakao-CDN photos, period. No LLM rewriting, no translation.
+Each Notion page holds the raw alimnota text + original Kidsnote media.
+LLM is used only to create the report page title, not body callouts.
 
 Dedup:
     Each Notion page stores the Kidsnote `report_id` in a `Report ID`
@@ -14,11 +14,9 @@ Dedup:
     skip any report whose id is already there. Notion is the source of
     truth; no state.json or git artifact.
 
-Privacy guards:
-    - EXIF GPS + MakerNote stripped in-memory before upload.
-    - Photo bytes that exceed `max_image_bytes` (Notion free-tier cap
-      5 MB) are resized + JPEG-quality-stepped via the shared
-      kidsnote_diary_suite.publisher.image_compress helper.
+Media preservation:
+    Original Kidsnote bytes, filenames, and metadata are preserved. Files
+    that cannot fit in Notion are uploaded unchanged to Google Drive fallback.
 """
 from __future__ import annotations
 
@@ -29,6 +27,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -71,7 +70,7 @@ def _get_ollama() -> dict[str, str] | None:
     _OLLAMA_TRIED = True
     import os
     host = os.environ.get("OLLAMA_HOST")
-    model = os.environ.get("OLLAMA_MODEL") or "qwen2.5:1.5b"
+    model = os.environ.get("OLLAMA_MODEL") or "gemma4:e4b"
     if not host:
         return None
     # Probe /api/version with a short timeout — fail fast.
@@ -80,12 +79,12 @@ def _get_ollama() -> dict[str, str] | None:
         r.raise_for_status()
         _OLLAMA_CONFIG = {"host": host.rstrip("/"), "model": model}
         logging.getLogger(__name__).info(
-            "Ollama available at %s (model=%s) for keyword extraction",
+            "Ollama available at %s (model=%s) for LLM title generation",
             host, model,
         )
     except Exception as e:
         logging.getLogger(__name__).warning(
-            "OLLAMA_HOST set but unreachable, falling back to kiwi/heuristic: %s", e,
+            "OLLAMA_HOST set but unreachable, LLM title generation unavailable: %s", e,
         )
         _OLLAMA_CONFIG = None
     return _OLLAMA_CONFIG
@@ -220,8 +219,7 @@ def _strip_cjk(text: str) -> tuple[str, int]:
     Returns ``(cleaned, removed_count)``. Korean Hangul is preserved
     (separate Unicode block); only the CJK ideograph blocks
     U+3400–U+4DBF, U+4E00–U+9FFF, and the CJK Extension blocks are
-    stripped. qwen2.5-family models occasionally leak Chinese into
-    Korean output; this is a defensive net to keep keepsake text clean.
+    stripped. This is a defensive net for local LLM output.
     """
     if not text:
         return text, 0
@@ -256,58 +254,16 @@ def _safe_url(url: str) -> str:
     return url.split("?", 1)[0]
 
 
-def compress_image_to_bytes(
-    raw: bytes,
-    target_bytes: int,
-    *,
-    max_side: int = 1920,
-    quality_steps: tuple[int, ...] = (85, 75, 65, 60),
-) -> tuple[bytes, bool]:
-    """Shrink an image so the encoded bytes fit within target_bytes.
-
-    Already small enough → returned as-is, was_compressed=False.
-    Otherwise: EXIF transpose → iterative resize (longest side capped at
-    `max_side`) and JPEG quality step-down until the buffer fits the
-    target, or the smallest setting is reached.
-
-    Returns (bytes, was_compressed).
-    """
-    if len(raw) <= target_bytes:
-        return raw, False
-    try:
-        from PIL import Image, ImageOps
-    except ImportError:
-        return raw, False
-
-    try:
-        img = Image.open(io.BytesIO(raw))
-        img = ImageOps.exif_transpose(img)
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-    except Exception:
-        return raw, False
-
-    # Cap the longest side to max_side without enlarging.
-    if max(img.size) > max_side:
-        ratio = max_side / max(img.size)
-        new_size = (int(img.width * ratio), int(img.height * ratio))
-        img = img.resize(new_size, Image.LANCZOS)
-
-    for q in quality_steps:
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=q, optimize=True, progressive=True)
-        data = buf.getvalue()
-        if len(data) <= target_bytes:
-            return data, True
-
-    # Last resort: return the smallest-quality output even if still oversized.
-    return data, True
-
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 DEFAULT_MAX_IMAGE_BYTES = 5_000_000   # Notion free-tier per-file cap.
 MAX_BLOCK_TEXT = 1900                 # Notion paragraph rich_text limit (2000).
 EXTERNAL_REF_PREFIX = "external:"
+FILENAME_KEYS = ("original_file_name", "file_name", "filename", "name")
+
+
+class MediaBackupError(RuntimeError):
+    """Raised when an original Kidsnote media file cannot be preserved."""
 
 
 class _DriveFallbackUploader:
@@ -500,38 +456,6 @@ TITLE_NAME_CANDIDATES = ("Name", "이름", "제목")
 REPORT_ID_NAME_CANDIDATES = ("Report ID", "리포트 ID", "리포트id", "report_id", "보고서 ID")
 DATE_NAME_CANDIDATES = ("Date", "날짜")
 
-
-def _strip_gps_in_memory(raw: bytes) -> bytes:
-    """Drop GPS + MakerNote EXIF tags from a JPEG buffer. Returns possibly
-    the same bytes object if the file is not a JPEG or piexif isn't available.
-    """
-    try:
-        import piexif
-    except ImportError:
-        return raw
-    try:
-        exif = piexif.load(raw)
-    except Exception:
-        return raw
-    changed = False
-    if exif.get("GPS"):
-        exif["GPS"] = {}
-        changed = True
-    exif_ifd = exif.get("Exif") or {}
-    if piexif.ExifIFD.MakerNote in exif_ifd:
-        exif_ifd.pop(piexif.ExifIFD.MakerNote, None)
-        exif["Exif"] = exif_ifd
-        changed = True
-    if not changed:
-        return raw
-    try:
-        out = io.BytesIO()
-        piexif.insert(piexif.dump(exif), raw, out)
-        return out.getvalue()
-    except Exception:
-        return raw
-
-
 class NotionMirror:
     """Push Kidsnote reports as Notion DB pages with built-in dedup."""
 
@@ -541,14 +465,12 @@ class NotionMirror:
         database_id: str,
         *,
         max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
-        strip_exif_gps: bool = True,
         session: requests.Session | None = None,
         timeout: int = 60,
     ) -> None:
         self.token = token
         self.database_id = database_id
         self.max_image_bytes = max_image_bytes
-        self.strip_exif_gps = strip_exif_gps
         self.session = session or requests.Session()
         self.timeout = timeout
         self.drive_fallback = _DriveFallbackUploader.from_env()
@@ -622,14 +544,64 @@ class NotionMirror:
         mime: str,
         *,
         kind: str,
-    ) -> str | None:
+    ) -> str:
         if self.drive_fallback is None:
-            return None
+            raise MediaBackupError(
+                f"{kind} {filename} cannot fit in Notion and Google Drive fallback is not configured"
+            )
         url = self.drive_fallback.upload(raw, filename, mime)
         if not url:
-            return None
+            raise MediaBackupError(f"Google Drive fallback upload failed for {kind} {filename}")
         _LOGGER.info("%s %s will be embedded from Google Drive fallback", kind, filename)
         return EXTERNAL_REF_PREFIX + url
+
+    @staticmethod
+    def _original_url(obj: Any, *, kind: str) -> str:
+        if isinstance(obj, str):
+            return obj
+        if not isinstance(obj, dict):
+            raise MediaBackupError(f"{kind} attachment has unsupported metadata shape")
+        url = obj.get("original")
+        if not url:
+            raise MediaBackupError(
+                f"{kind} attachment id={obj.get('id', '?')} has no original URL"
+            )
+        return str(url)
+
+    @staticmethod
+    def _original_filename(
+        obj: Any,
+        url: str,
+        *,
+        kind: str,
+    ) -> str:
+        if isinstance(obj, dict):
+            for key in FILENAME_KEYS:
+                value = obj.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        basename = unquote(urlparse(url).path.rsplit("/", 1)[-1]).strip()
+        if basename:
+            return basename
+        raise MediaBackupError(f"{kind} attachment has no original filename")
+
+    @staticmethod
+    def _download_original_media(
+        kidsnote_sess: requests.Session,
+        url: str,
+        *,
+        kind: str,
+        filename: str,
+        timeout: int,
+    ) -> bytes:
+        try:
+            resp = kidsnote_sess.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as e:
+            raise MediaBackupError(
+                f"{kind} {filename} download failed ({_safe_url(url)}): {e}"
+            ) from e
 
     # ----------------------------------------------------------- dedup
 
@@ -641,7 +613,7 @@ class NotionMirror:
         """Map every existing `Report ID` to its Notion page id.
 
         Used by --force-refresh to archive prior versions of each
-        report before publishing the new prompt-style callouts.
+        report before publishing the new title/page structure.
         """
         self._resolve_schema()
         assert self._prop_report_id is not None
@@ -697,71 +669,11 @@ class NotionMirror:
         self,
         raw: bytes,
         filename_hint: str,
-    ) -> str | None:
-        """EXIF strip -> shrink -> Notion file_uploads, with optional Drive fallback."""
-        is_jpeg = filename_hint.lower().endswith((".jpg", ".jpeg"))
-        if self.strip_exif_gps and is_jpeg:
-            raw = _strip_gps_in_memory(raw)
-        data, was_compressed = compress_image_to_bytes(raw, self.max_image_bytes)
-
-        if was_compressed:
-            mime = "image/jpeg"
-            send_name = filename_hint.rsplit(".", 1)[0] + ".jpg"
-        elif is_jpeg:
-            mime = "image/jpeg"
-            send_name = filename_hint
-        elif filename_hint.lower().endswith(".png"):
-            mime = "image/png"
-            send_name = filename_hint
-        else:
-            mime = "application/octet-stream"
-            send_name = filename_hint
-
-        if len(data) > self.max_image_bytes:
-            fallback_ref = self._upload_to_drive_fallback(
-                data, send_name, mime, kind="image",
-            )
-            if fallback_ref:
-                return fallback_ref
-            _LOGGER.warning(
-                "image %s still %d bytes after compression > %d cap; skipping",
-                filename_hint, len(data), self.max_image_bytes,
-            )
-            return None
-
-        try:
-            # Step 1 — open an upload handle.
-            r = self.session.post(
-                f"{NOTION_API}/file_uploads",
-                headers=self._headers(),
-                json={},
-                timeout=self.timeout,
-            )
-            r.raise_for_status()
-            handle = r.json()
-            upload_url = handle["upload_url"]
-            file_upload_id = handle["id"]
-        except Exception as e:
-            _LOGGER.warning("file_uploads create failed for %s: %s", filename_hint, e)
-            return self._upload_to_drive_fallback(data, send_name, mime, kind="image")
-
-        try:
-            # Step 2 — POST the actual bytes (multipart).
-            r = self.session.post(
-                upload_url,
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Notion-Version": NOTION_VERSION,
-                },
-                files={"file": (send_name, io.BytesIO(data), mime)},
-                timeout=self.timeout * 3,
-            )
-            r.raise_for_status()
-        except Exception as e:
-            _LOGGER.warning("file upload PUT failed for %s: %s", filename_hint, e)
-            return self._upload_to_drive_fallback(data, send_name, mime, kind="image")
-
-        return file_upload_id
+    ) -> str:
+        """Upload original image bytes without EXIF/filename/content changes."""
+        return self._upload_original_media(
+            raw, filename_hint, mime=self._guess_mime(filename_hint), kind="image",
+        )
 
     # ----------------------------------------------------------- video / file upload
 
@@ -776,6 +688,13 @@ class NotionMirror:
             "webm": "video/webm",
             "avi": "video/x-msvideo",
             "mkv": "video/x-matroska",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "heic": "image/heic",
+            "heif": "image/heif",
             "pdf": "application/pdf",
             "doc": "application/msword",
             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -793,25 +712,28 @@ class NotionMirror:
         filename: str,
         *,
         kind: str,  # "video" or "file" — for logging only
-    ) -> str | None:
+    ) -> str:
         """Upload a non-image attachment as-is (no compression).
 
         Notion's per-file cap (5 MiB on free tier) is enforced first; anything
-        over the cap can be preserved through the optional Drive fallback.
-        Returns a Notion file_upload_id, an external ref, or None on skip/error.
+        over the cap is preserved through Google Drive fallback.
+        Returns a Notion file_upload_id or an external ref.
         """
-        mime = self._guess_mime(filename)
+        return self._upload_original_media(
+            raw, filename, mime=self._guess_mime(filename), kind=kind,
+        )
+
+    def _upload_original_media(
+        self,
+        raw: bytes,
+        filename: str,
+        *,
+        mime: str,
+        kind: str,
+    ) -> str:
+        """Upload exact bytes to Notion or exact bytes to Drive fallback."""
         if len(raw) > self.max_image_bytes:
-            fallback_ref = self._upload_to_drive_fallback(
-                raw, filename, mime, kind=kind,
-            )
-            if fallback_ref:
-                return fallback_ref
-            _LOGGER.warning(
-                "%s %s is %d bytes > %d cap; skipping (Notion free tier limit)",
-                kind, filename, len(raw), self.max_image_bytes,
-            )
-            return None
+            return self._upload_to_drive_fallback(raw, filename, mime, kind=kind)
 
         try:
             r = self.session.post(
@@ -844,6 +766,23 @@ class NotionMirror:
             return self._upload_to_drive_fallback(raw, filename, mime, kind=kind)
 
         return file_upload_id
+
+    def _upload_media_object(
+        self,
+        kidsnote_sess: requests.Session,
+        obj: Any,
+        *,
+        kind: str,
+        timeout: int,
+    ) -> tuple[str, str]:
+        url = self._original_url(obj, kind=kind)
+        filename = self._original_filename(obj, url, kind=kind)
+        raw = self._download_original_media(
+            kidsnote_sess, url, kind=kind, filename=filename, timeout=timeout,
+        )
+        if kind == "image":
+            return self._upload_one_image(raw, filename), filename
+        return self._upload_one_blob(raw, filename, kind=kind), filename
 
     # ----------------------------------------------------------- page build
 
@@ -911,6 +850,46 @@ class NotionMirror:
             "file": payload,
         }
 
+    @staticmethod
+    def _author_role_label(author_type: str, *, emoji: bool) -> str:
+        labels = {
+            "teacher": ("👩‍🏫 선생님", "선생님"),
+            "parent": ("👨‍👩‍👧 부모", "부모"),
+            "admin": ("🏫 원감", "원감"),
+        }
+        with_emoji, plain = labels.get(author_type, ("✏️ 작성자", "작성자"))
+        return with_emoji if emoji else plain
+
+    @classmethod
+    def _author_display(cls, item: dict[str, Any], *, emoji: bool) -> str:
+        author = item.get("author") or {}
+        atype = author.get("type") or ""
+        name = item.get("author_name") or author.get("name") or ""
+        role = cls._author_role_label(atype, emoji=emoji)
+        return f"{role} {name}".strip()
+
+    @classmethod
+    def _weather_callout(cls, report: dict[str, Any]) -> dict[str, Any] | None:
+        # Weather is the Kidsnote API field only. Parent posts can carry a
+        # daycare auto-weather value, so omit it there to avoid false context.
+        atype = (report.get("author") or {}).get("type") or ""
+        w_code = report.get("weather") if atype != "parent" else None
+        if not w_code:
+            return None
+        w_display = WEATHER_KO.get(w_code, w_code)
+        return {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{
+                    "type": "text",
+                    "text": {"content": f"키즈노트 입력 날씨: {w_display}"},
+                }],
+                "icon": {"type": "emoji", "emoji": "🌤️"},
+                "color": "blue_background",
+            },
+        }
+
     def _build_children(
         self,
         report: dict[str, Any],
@@ -920,87 +899,22 @@ class NotionMirror:
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
 
+        weather = self._weather_callout(report)
+        if weather:
+            blocks.append(weather)
+
         # Metadata header (gray, single line) — author role depends on author.type
         meta_bits: list[str] = []
-        atype = (report.get("author") or {}).get("type") or ""
-        aname = report.get("author_name") or (report.get("author") or {}).get("name") or ""
-        if aname:
-            role_label = {
-                "teacher": "👩‍🏫 선생님",
-                "parent": "👨‍👩‍👧 부모",
-                "admin": "🏫 원감",
-            }.get(atype, "✏️ 작성자")
-            meta_bits.append(f"{role_label} {aname}")
+        author_text = self._author_display(report, emoji=True)
+        if author_text:
+            meta_bits.append(author_text)
         if report.get("class_name"):
             meta_bits.append(f"{report['class_name']}")
         if report.get("date_written"):
             meta_bits.append(f"작성 {report['date_written']}")
+        meta_bits.extend(self._life_record_bits(report))
         if meta_bits:
             blocks.append(self._para(" · ".join(meta_bits), color="gray"))
-
-        # LLM-driven callouts (only when Ollama available). Skipped gracefully
-        # when no LLM is reachable so non-LLM users still get a clean page.
-        body_for_summary = (report.get("content") or "").strip()
-        cname = report.get("child_name") or ""
-        if body_for_summary:
-            oneliner = self._summary_oneliner(body_for_summary)
-            if oneliner:
-                blocks.append({
-                    "object": "block",
-                    "type": "callout",
-                    "callout": {
-                        "rich_text": [{"type": "text", "text": {"content": oneliner}}],
-                        "icon": {"type": "emoji", "emoji": "💭"},
-                        "color": "purple_background",
-                    },
-                })
-            # Child first-person diary
-            child_diary = self._child_voice_diary(body_for_summary, cname)
-            if child_diary:
-                blocks.append({
-                    "object": "block",
-                    "type": "callout",
-                    "callout": {
-                        "rich_text": [{"type": "text", "text": {"content": child_diary}}],
-                        "icon": {"type": "emoji", "emoji": "🧒"},
-                        "color": "yellow_background",
-                    },
-                })
-            # Parent diary (imagined; works whether the report itself was
-            # parent- or teacher-written — kidsnote shows the alimnota to
-            # the family either way).
-            parent_diary = self._parent_voice_diary(body_for_summary, cname)
-            if parent_diary:
-                blocks.append({
-                    "object": "block",
-                    "type": "callout",
-                    "callout": {
-                        "rich_text": [{"type": "text", "text": {"content": parent_diary}}],
-                        "icon": {"type": "emoji", "emoji": "👨‍👩‍👧"},
-                        "color": "pink_background",
-                    },
-                })
-
-        # Weather callout — only for teacher/admin posts (kidsnote auto-fills
-        # weather on parent posts too, which would be misleading) and only
-        # when the daycare actually filled in the weather field.
-        # No body-text inference (per design: ``있는 그대로``).
-        _atype = (report.get("author") or {}).get("type") or ""
-        w_code = report.get("weather") if _atype != "parent" else None
-        if w_code:
-            w_display = WEATHER_KO.get(w_code, w_code)
-            blocks.append({
-                "object": "block",
-                "type": "callout",
-                "callout": {
-                    "rich_text": [{
-                        "type": "text",
-                        "text": {"content": f"오늘의 날씨: {w_display}"},
-                    }],
-                    "icon": {"type": "emoji", "emoji": "🌤️"},
-                    "color": "blue_background",
-                },
-            })
 
         # Body content
         body = (report.get("content") or "").strip()
@@ -1008,7 +922,7 @@ class NotionMirror:
             for chunk in self._chunk(body):
                 blocks.append(self._para(chunk))
 
-        # Photos (one image block per uploaded file)
+        # Photos (one image block per preserved original file)
         if image_upload_ids:
             blocks.append({
                 "object": "block",
@@ -1018,7 +932,7 @@ class NotionMirror:
             for fid in image_upload_ids:
                 blocks.append(self._image_block(fid))
 
-        # Videos (only those that fit Notion's per-file cap)
+        # Videos (Notion file_upload or Google Drive fallback)
         if video_upload_ids:
             blocks.append({
                 "object": "block",
@@ -1189,8 +1103,9 @@ class NotionMirror:
     @classmethod
     def _summarize_text(cls, text: str, max_chars: int = 80) -> str:
         """Title-line **keyword** extraction. kiwipiepy → heuristic fallback.
-        (Ollama is reserved for the longer-form summary callout — see
-        ``_summary_oneliner``.)
+
+        Kept for non-report titles and dashboard categorisation; report
+        titles use the speaker-aware Gemma title prompt instead.
         """
         if not text:
             return ""
@@ -1248,8 +1163,8 @@ class NotionMirror:
         # Drop task-restatement lead-ins ("...써봅니다.").
         if strip_meta:
             out = _strip_lead_meta(out)
-        # Strip any Chinese hanja the model leaked (qwen2.5 occasionally
-        # falls back to Chinese mid-sentence). Hangul/punctuation kept.
+        # Strip any Chinese hanja a local model may leak mid-sentence.
+        # Hangul/punctuation kept.
         original_len = len(out)
         out, cjk_removed = _strip_cjk(out)
         if cjk_removed and original_len > 0:
@@ -1269,114 +1184,72 @@ class NotionMirror:
         return out[:max_chars]
 
     @classmethod
-    def _child_voice_diary(cls, text: str, child_name: str = "") -> str | None:
-        """Convert teacher's alimnota into child's first-person diary.
-
-        Uses a one-shot example because instruction-only prompts caused
-        weaker models (qwen2.5:7b) to copy the teacher's third-person
-        narration verbatim instead of converting perspective.
-        """
-        if not text or len(text.strip()) < 30:
-            return None
-        given = _given_name(child_name) or "아이"
-        prompt = (
-            f"다음 어린이집 알림장을 자녀({given})의 1인칭 일기로 "
-            "한국어 2-3문장으로 바꿔쓰세요. ``나``가 주어가 되어야 하고, "
-            "선생님 호칭(``어머니~``, ``선생님께`` 등)은 절대 쓰지 마세요. "
-            "알림장이 부모가 쓴 글이어도(예: ``하린이는 어제 잘 놀았어요``) "
-            "똑같이 어린이 1인칭(``어제 잘 놀았어``)으로 변환하세요. "
-            "메타 설명(``아래와 같이 변환해 드릴게요`` 등) 절대 금지 — "
-            "바로 일기 본문만 답하세요.\n\n"
-            "[예시 1 — 선생님 작성]\n"
-            f"알림장: {given}이는 친구에게 장난감을 건네주며 사회성이 "
-            "자라는 모습이었습니다.\n"
-            "일기: 오늘 친구한테 내 장난감을 줬어. 친구가 좋아하니까 "
-            "나도 기분이 좋았어!\n\n"
-            "[예시 2 — 부모 작성]\n"
-            f"알림장: {given}이는 어제 잘 놀고 잘 먹었습니다. 콧물이 좀 났어요.\n"
-            "일기: 어제 잘 놀고 밥도 잘 먹었어! 콧물이 좀 나서 답답했지만 괜찮아.\n\n"
-            "[지금 변환할 알림장]\n"
-            f"알림장: {text[:1200]}\n"
-            "일기:"
-        )
-        return cls._ask_ollama(
-            prompt, max_chars=350, num_predict=130,
-            final_labels=("일기:",),
-        )
+    def _speaker_context(
+        cls,
+        report: dict[str, Any],
+        comments: list[dict[str, Any]],
+    ) -> str:
+        body_author = cls._author_display(report, emoji=False) or "작성자"
+        body = (report.get("content") or "").strip()
+        lines = [
+            f"본문 작성자: {body_author}",
+            f"본문: {body or '(본문 없음)'}",
+        ]
+        for idx, comment in enumerate(comments, 1):
+            c_author = cls._author_display(comment, emoji=False) or "댓글 작성자"
+            content = (comment.get("content") or "").strip()
+            if not content and comment.get("emoticon_content"):
+                content = "[이모티콘]"
+            if content:
+                lines.append(f"댓글 {idx} 작성자: {c_author}")
+                lines.append(f"댓글 {idx}: {content}")
+        return "\n".join(lines)
 
     @classmethod
-    def _parent_voice_diary(cls, text: str, child_name: str = "") -> str | None:
-        """Parent-to-child love letter inspired by today's alimnota.
-
-        Written so the child, years later, will feel moved when reading it
-        back. Uses a one-shot example because abstract instructions like
-        "느껴지게" leaked verbatim into earlier model outputs.
-        """
-        if not text or len(text.strip()) < 30:
+    def _title_oneliner(
+        cls,
+        report: dict[str, Any],
+        comments: list[dict[str, Any]],
+    ) -> str | None:
+        """Speaker-aware one-line report title using Ollama/Gemma."""
+        context = cls._speaker_context(report, comments)
+        if len(context.strip()) < 20:
             return None
-        addressee = _addressee(child_name)
-        given = _given_name(child_name) or "아이"
         prompt = (
-            f"부모가 자녀({given})에게 쓰는 짧은 편지. 알림장에 나온 "
-            "그날의 실제 사건 1-2개를 구체적으로 언급하면서, 자녀가 자라서 "
-            "이 편지를 봤을 때 부모의 사랑이 전해지게 써. 2-3문장, 한국어.\n\n"
+            "아래 키즈노트 알림장과 댓글을 읽고 Notion 페이지 제목에 넣을 "
+            "한줄요약을 한국어 45자 이내로 작성하세요.\n"
+            "규칙:\n"
+            "1. 본문 작성자와 댓글 작성자를 구분하세요.\n"
+            "2. 누가 말했는지, 그 사람이 무엇을 말했는지 정확히 반영하세요.\n"
+            "3. 댓글은 본문에 대한 답변입니다. 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요.\n"
+            "4. '원'은 어린이집/기관을 뜻할 수 있으니 사람 이름처럼 바꾸지 마세요.\n"
+            "5. 추측, 존댓말 메타 설명, 따옴표, 이모지 없이 제목 문장만 답하세요.\n\n"
             "[예시]\n"
-            f"알림장: {given}이는 친구에게 장난감을 건네주며 사회성이 "
-            "자라는 모습을 보였습니다. ``동물농장`` 노래에 박수를 쳤어요.\n"
-            f"편지: {addressee}, 오늘 친구에게 장난감을 양보했다는 얘기를 "
-            "들었어. 엄마는 네가 친구를 아끼는 마음이 자라는 모습이 "
-            f"참 자랑스러웠단다. ``동물농장`` 노래에 짝짝 박수치는 너의 "
-            "모습이 눈에 선해.\n\n"
-            "[지금 작성할 편지]\n"
-            f"알림장: {text[:1200]}\n"
-            "편지:"
+            "본문 작성자: 부모 정이담 아빠\n"
+            "본문: 안녕하세요. 선생님! 오늘 이담이 하원은 제가 원으로 데리러 갈게요!\n"
+            "댓글 1 작성자: 선생님 물빛1반 교사\n"
+            "댓글 1: 네~ 놀이하며 기다리겠습니다😊\n"
+            "제목: 아빠가 이담이를 어린이집으로 데리러 간다고 알림\n\n"
+            "[작성할 알림장]\n"
+            f"{context[:1800]}\n\n"
+            "제목:"
         )
-        return cls._ask_ollama(
-            prompt, max_chars=400, num_predict=160,
-            final_labels=("편지:",),
+        out = cls._ask_ollama(
+            prompt,
+            max_chars=90,
+            temperature=0.2,
+            num_predict=80,
+            timeout=90,
+            final_labels=("제목:", "한줄요약:", "요약:"),
         )
-
-    @classmethod
-    def _summary_oneliner(cls, text: str) -> str | None:
-        """One-sentence body summary using Ollama (LLM). Returns None when
-        no Ollama server is reachable (caller should just skip the summary
-        callout in that case).
-        """
-        if not text or len(text.strip()) < 20:
+        if not out:
             return None
-        cfg = _get_ollama()
-        if cfg is None:
+        first = out.split("\n", 1)[0].strip().lstrip("- ").lstrip("* ").strip()
+        first = re.sub(r"^(제목|한줄요약|요약)\s*[:：]\s*", "", first).strip()
+        first = first.strip('"').strip("'").strip()
+        if len(first) < 5 or len(first) > 120:
             return None
-        prompt = (
-            "다음 어린이집 알림장 본문을 한 문장(40자 이내)으로 요약해. "
-            "활동·식사·기분 등 중요한 내용만 자연스럽게. "
-            "다른 설명 없이 요약문만 한 줄로 답해.\n\n"
-            f"본문: {text[:1500]}\n\n요약:"
-        )
-        try:
-            r = requests.post(
-                f"{cfg['host']}/api/generate",
-                json={
-                    "model": cfg["model"],
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 80},
-                },
-                timeout=60,
-            )
-            r.raise_for_status()
-            out = (r.json().get("response") or "").strip()
-            if not out:
-                return None
-            # Drop anything after the first line / colon-style prefix.
-            first = out.split("\n")[0].strip().lstrip("- ").lstrip("* ")
-            # Guard against junk responses
-            if len(first) < 5 or len(first) > 200:
-                return None
-            return first
-        except Exception as e:
-            logging.getLogger(__name__).debug("ollama summary skipped: %s", e)
-            return None
+        return first
 
     @classmethod
     def _summarize_text_kiwi(cls, kiwi: Any, text: str, max_chars: int) -> str:
@@ -1693,20 +1566,13 @@ class NotionMirror:
             # Meal photo (if any + session available)
             if kidsnote_sess is None or not isinstance(img, dict):
                 continue
-            url = img.get("original") or img.get("large") or img.get("url")
-            if not url:
-                continue
             try:
-                resp = kidsnote_sess.get(url, timeout=120)
-                resp.raise_for_status()
-                raw = resp.content
-            except Exception as e:
-                _LOGGER.warning("menu photo download failed (%s): %s", _safe_url(url), e)
-                continue
-            hint = img.get("original_file_name") or f"menu_{text_field}.jpg"
-            fid = self._upload_one_image(raw, hint)
-            if fid:
+                fid, _filename = self._upload_media_object(
+                    kidsnote_sess, img, kind="image", timeout=120,
+                )
                 out.append(self._image_block(fid))
+            except MediaBackupError:
+                raise
         return out
 
     @staticmethod
@@ -1714,6 +1580,8 @@ class NotionMirror:
         kidsnote_sess: requests.Session,
         kind: str,
         item_id: int,
+        *,
+        strict: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch parent + teacher comments on a report/notice/album.
 
@@ -1722,7 +1590,8 @@ class NotionMirror:
             GET /api/v1/notices/<id>/comments/
             GET /api/v1/albums/<id>/comments/  (same pattern)
 
-        Returns empty list on any error so callers don't have to special-case.
+        When strict=True, failures raise so the page is not created without
+        comments that Kidsnote says exist.
         """
         try:
             r = kidsnote_sess.get(
@@ -1730,9 +1599,14 @@ class NotionMirror:
                 timeout=15,
             )
             if r.status_code != 200:
+                if strict:
+                    raise RuntimeError(f"comment fetch returned HTTP {r.status_code}")
                 return []
             return r.json().get("results") or []
-        except Exception:
+        except Exception as e:
+            if strict:
+                raise RuntimeError(f"comment fetch failed for {kind} id={item_id}: {e}") from e
+            _LOGGER.warning("comment fetch failed for %s id=%s: %s", kind, item_id, e)
             return []
 
     def _comment_blocks(self, comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1803,99 +1677,33 @@ class NotionMirror:
             or (report.get("created") or "")[:10]
             or datetime.now().date().isoformat()
         )
-        # Title parts (built in order):
-        #   [date]  author_icon  weather_emoji?  activity_labels_or_summary
-        # Each piece appears only when meaningful.
-        author_type = (report.get("author") or {}).get("type") or ""
-        author_icon = {
-            "teacher": "👩‍🏫",
-            "parent": "👨‍👩‍👧",
-            "admin": "🏫",
-        }.get(author_type, "📝")
-
-        # Weather: API field only. Parent-written entries get the daycare's
-        # weather auto-attached by kidsnote (regardless of whether the
-        # parent saw it), which is misleading — strip it for parent posts.
-        w_code = report.get("weather") if author_type != "parent" else None
-        w_emoji = ""
-        if w_code:
-            w_display = WEATHER_KO.get(w_code, "")
-            if w_display:
-                w_emoji = w_display.split()[0]
-
-        body_text = report.get("content") or ""
-        categories = self._classify_categories(body_text)
-        if categories:
-            tail = " · ".join(categories)
-        else:
-            # Fallback to keyword summary. Strip several variants of the
-            # child's name so it doesn't dominate the keyword list:
-            #   full name (e.g. ``우하린``),
-            #   last 2 chars (``하린``),
-            #   either of those + ``이`` (``하린이`` is what teachers write).
-            cname = report.get("child_name") or ""
-            stripped = body_text
-            if cname:
-                # Common Korean particle / suffix patterns that hang off a
-                # given name. Strip from the full ``cname`` and from the
-                # short (last 2 chars) form, since teachers/parents often
-                # use the short name (``하린이`` instead of ``우하린``).
-                particle_suffixes = (
-                    "이네용", "이네", "이가요", "이가",
-                    "이는요", "이는", "이의",
-                    "이도", "이만", "이를", "이에게",
-                    "이요", "이",
-                )
-                variants: set[str] = {cname}
-                for ps in particle_suffixes:
-                    variants.add(cname + ps)
-                if len(cname) >= 2:
-                    short = cname[-2:]
-                    variants.add(short)
-                    for ps in particle_suffixes:
-                        variants.add(short + ps)
-                # Apply longer variants first so a leading shorter form
-                # doesn't gobble up part of a longer suffix.
-                for v in sorted(variants, key=len, reverse=True):
-                    stripped = stripped.replace(v, "")
-            summary = self._summarize_text(stripped)
-            tail = summary or f"알림장 #{report_id}"
-
-        prefix_emojis = author_icon + (f" {w_emoji}" if w_emoji else "")
-        title = f"[{date_str}] 알림장: {prefix_emojis} {tail}"
+        comments = (
+            self._fetch_comments(kidsnote_sess, "reports", report_id, strict=True)
+            if report.get("num_comments")
+            else []
+        )
+        oneliner = self._title_oneliner(report, comments)
+        if not oneliner:
+            raise RuntimeError(
+                f"Gemma4 title generation failed for report id={report_id}; "
+                "page was not created so the next run can retry"
+            )
+        author_title = self._author_display(report, emoji=False) or "작성자"
+        title = f"[{date_str}] 알림장: {author_title} {oneliner}"
 
         # Upload photos first so we can drop image blocks into the page body.
         image_upload_ids: list[str] = []
         images_failed = 0
         for img in report.get("attached_images") or []:
-            if not isinstance(img, dict):
-                continue
-            url = (
-                img.get("original")
-                or img.get("high_resize")
-                or img.get("large")
-                or img.get("url")
-            )
-            if not url:
-                images_failed += 1
-                continue
             try:
-                resp = kidsnote_sess.get(url, timeout=120)
-                resp.raise_for_status()
-                raw_bytes = resp.content
-            except Exception as e:
-                _LOGGER.warning("photo download failed (%s): %s", _safe_url(url), e)
-                images_failed += 1
-                continue
-            hint = img.get("original_file_name") or f"image_{img.get('id', 'x')}.jpg"
-            fid = self._upload_one_image(raw_bytes, hint)
-            if fid:
+                fid, _filename = self._upload_media_object(
+                    kidsnote_sess, img, kind="image", timeout=120,
+                )
                 image_upload_ids.append(fid)
-            else:
-                images_failed += 1
+            except MediaBackupError:
+                raise
 
         # Videos: kidsnote stores it as a single object (or None / list of 1).
-        # Notion's per-file cap (5 MiB free) applies; over-cap videos are skipped.
         video_upload_ids: list[str] = []
         videos_failed = 0
         video_objs: list[dict[str, Any]] = []
@@ -1908,69 +1716,29 @@ class NotionMirror:
                 video_objs.extend(x for x in v if isinstance(x, dict))
                 break
         for vobj in video_objs:
-            url = (
-                vobj.get("original")
-                or vobj.get("high")
-                or vobj.get("url")
-            )
-            if not url:
-                videos_failed += 1
-                continue
             try:
-                resp = kidsnote_sess.get(url, timeout=180)
-                resp.raise_for_status()
-                raw_bytes = resp.content
-            except Exception as e:
-                _LOGGER.warning("video download failed (%s): %s", _safe_url(url), e)
-                videos_failed += 1
-                continue
-            hint = vobj.get("original_file_name") or f"video_{vobj.get('id', 'x')}.mp4"
-            fid = self._upload_one_blob(raw_bytes, hint, kind="video")
-            if fid:
+                fid, _filename = self._upload_media_object(
+                    kidsnote_sess, vobj, kind="video", timeout=180,
+                )
                 video_upload_ids.append(fid)
-            else:
-                videos_failed += 1
+            except MediaBackupError:
+                raise
 
         # Other file attachments (PDF, Excel, etc.) — same 5 MiB cap.
         file_upload_ids: list[tuple[str, str]] = []
         files_failed = 0
         for fobj in report.get("attached_files") or []:
-            if not isinstance(fobj, dict):
-                continue
-            url = fobj.get("original") or fobj.get("url")
-            if not url:
-                files_failed += 1
-                continue
             try:
-                resp = kidsnote_sess.get(url, timeout=180)
-                resp.raise_for_status()
-                raw_bytes = resp.content
-            except Exception as e:
-                _LOGGER.warning("file download failed (%s): %s", _safe_url(url), e)
-                files_failed += 1
-                continue
-            hint = fobj.get("original_file_name") or f"file_{fobj.get('id', 'x')}.bin"
-            fid = self._upload_one_blob(raw_bytes, hint, kind="file")
-            if fid:
-                file_upload_ids.append((fid, hint))
-            else:
-                files_failed += 1
+                fid, filename = self._upload_media_object(
+                    kidsnote_sess, fobj, kind="file", timeout=180,
+                )
+                file_upload_ids.append((fid, filename))
+            except MediaBackupError:
+                raise
 
         children = self._build_children(
             report, image_upload_ids, video_upload_ids, file_upload_ids,
         )
-
-        # Append life-record chips to the meta paragraph (first gray paragraph).
-        life_bits = self._life_record_bits(report)
-        if life_bits and children and children[0].get("type") == "paragraph":
-            rt = children[0]["paragraph"]["rich_text"]
-            base = rt[0]["text"]["content"] if rt else ""
-            merged = (base + " · " if base else "") + " · ".join(life_bits)
-            children[0]["paragraph"]["rich_text"] = [{
-                "type": "text",
-                "text": {"content": merged},
-                "annotations": {"color": "gray"},
-            }]
 
         # Insert life-record detail blocks (food/sleep/nursing timelines) +
         # daily menu summary (if provided) before the attachment sections.
@@ -1991,9 +1759,7 @@ class NotionMirror:
                         break
             children = children[:insert_idx] + extras + children[insert_idx:]
 
-        # Append comments (parent + teacher replies) at the very end.
-        if report.get("num_comments"):
-            comments = self._fetch_comments(kidsnote_sess, "reports", report_id)
+        if comments:
             children.extend(self._comment_blocks(comments))
 
         # Resolve property names on first publish (cached for subsequent calls).
@@ -2060,31 +1826,13 @@ class NotionMirror:
         image_upload_ids: list[str] = []
         images_failed = 0
         for img in item.get("attached_images") or []:
-            if not isinstance(img, dict):
-                continue
-            url = (
-                img.get("original")
-                or img.get("high_resize")
-                or img.get("large")
-                or img.get("url")
-            )
-            if not url:
-                images_failed += 1
-                continue
             try:
-                resp = kidsnote_sess.get(url, timeout=120)
-                resp.raise_for_status()
-                raw_bytes = resp.content
-            except Exception as e:
-                _LOGGER.warning("photo download failed (%s): %s", _safe_url(url), e)
-                images_failed += 1
-                continue
-            hint = img.get("original_file_name") or f"image_{img.get('id', 'x')}.jpg"
-            fid = self._upload_one_image(raw_bytes, hint)
-            if fid:
+                fid, _filename = self._upload_media_object(
+                    kidsnote_sess, img, kind="image", timeout=120,
+                )
                 image_upload_ids.append(fid)
-            else:
-                images_failed += 1
+            except MediaBackupError:
+                raise
 
         # ---- Upload videos ----
         video_upload_ids: list[str] = []
@@ -2099,49 +1847,25 @@ class NotionMirror:
                 video_objs.extend(x for x in v if isinstance(x, dict))
                 break
         for vobj in video_objs:
-            url = vobj.get("original") or vobj.get("high") or vobj.get("url")
-            if not url:
-                videos_failed += 1
-                continue
             try:
-                resp = kidsnote_sess.get(url, timeout=180)
-                resp.raise_for_status()
-                raw_bytes = resp.content
-            except Exception as e:
-                _LOGGER.warning("video download failed (%s): %s", _safe_url(url), e)
-                videos_failed += 1
-                continue
-            hint = vobj.get("original_file_name") or f"video_{vobj.get('id', 'x')}.mp4"
-            fid = self._upload_one_blob(raw_bytes, hint, kind="video")
-            if fid:
+                fid, _filename = self._upload_media_object(
+                    kidsnote_sess, vobj, kind="video", timeout=180,
+                )
                 video_upload_ids.append(fid)
-            else:
-                videos_failed += 1
+            except MediaBackupError:
+                raise
 
         # ---- Upload generic files ----
         file_upload_ids: list[tuple[str, str]] = []
         files_failed = 0
         for fobj in item.get("attached_files") or []:
-            if not isinstance(fobj, dict):
-                continue
-            url = fobj.get("original") or fobj.get("url")
-            if not url:
-                files_failed += 1
-                continue
             try:
-                resp = kidsnote_sess.get(url, timeout=180)
-                resp.raise_for_status()
-                raw_bytes = resp.content
-            except Exception as e:
-                _LOGGER.warning("file download failed (%s): %s", _safe_url(url), e)
-                files_failed += 1
-                continue
-            hint = fobj.get("original_file_name") or f"file_{fobj.get('id', 'x')}.bin"
-            fid = self._upload_one_blob(raw_bytes, hint, kind="file")
-            if fid:
-                file_upload_ids.append((fid, hint))
-            else:
-                files_failed += 1
+                fid, filename = self._upload_media_object(
+                    kidsnote_sess, fobj, kind="file", timeout=180,
+                )
+                file_upload_ids.append((fid, filename))
+            except MediaBackupError:
+                raise
 
         # ---- Build body blocks ----
         blocks: list[dict[str, Any]] = []
@@ -2179,7 +1903,7 @@ class NotionMirror:
 
         # ---- Append comments (parent + teacher replies) at the end ----
         if comment_kind and item.get("num_comments"):
-            comments = self._fetch_comments(kidsnote_sess, comment_kind, item_id)
+            comments = self._fetch_comments(kidsnote_sess, comment_kind, item_id, strict=True)
             blocks.extend(self._comment_blocks(comments))
 
         # ---- Create page ----
@@ -2344,22 +2068,15 @@ class NotionMirror:
 
             # Photo (if present)
             if isinstance(meal_img, dict):
-                url = meal_img.get("original") or meal_img.get("large") or meal_img.get("url")
-                if url:
-                    try:
-                        resp = kidsnote_sess.get(url, timeout=120)
-                        resp.raise_for_status()
-                        raw = resp.content
-                        hint = meal_img.get("original_file_name") or f"menu_{menu_id}_{text_field}.jpg"
-                        fid = self._upload_one_image(raw, hint)
-                        if fid:
-                            blocks.append(self._image_block(fid))
-                            images_uploaded += 1
-                        else:
-                            images_failed += 1
-                    except Exception as e:
-                        _LOGGER.warning("menu photo download failed (%s): %s", _safe_url(url), e)
-                        images_failed += 1
+                try:
+                    fid, _filename = self._upload_media_object(
+                        kidsnote_sess, meal_img, kind="image", timeout=120,
+                    )
+                    blocks.append(self._image_block(fid))
+                    images_uploaded += 1
+                except MediaBackupError:
+                    images_failed += 1
+                    raise
 
         # Resolve property names + assemble payload.
         self._resolve_schema()
@@ -2623,8 +2340,8 @@ class NotionMirror:
             blocks.append(self._h2("📎 첨부물 누계"))
             lines = [
                 f"📷 사진 {att.get('images', 0):,} 장",
-                f"🎬 동영상 {att.get('videos', 0):,} 개  (업로드 실패/skip {att.get('videos_skipped', 0)} 개)",
-                f"📄 첨부파일 {att.get('files', 0):,} 개  (업로드 실패/skip {att.get('files_skipped', 0)} 개)",
+                f"🎬 동영상 {att.get('videos', 0):,} 개  (백업 실패 {att.get('videos_skipped', 0)} 개)",
+                f"📄 첨부파일 {att.get('files', 0):,} 개  (백업 실패 {att.get('files_skipped', 0)} 개)",
             ]
             for line in lines:
                 blocks.append({

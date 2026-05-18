@@ -1,11 +1,9 @@
 # Kidsnote → Notion mirror
 #
-# MANUAL EXECUTION ONLY. Kidsnote's login flow can no longer be driven by
-# a headless HTTP client (the page is a Next.js SPA). So the workflow
-# relies on a `sessionid` cookie the operator extracts manually from a
-# logged-in browser session (Chrome F12 → Application → Cookies) and
-# stores in the KIDSNOTE_SESSION_COOKIE secret. That cookie typically
-# lasts ~30 days; when it expires, re-extract and re-run.
+# Kidsnote's login flow can no longer be driven by a headless HTTP client
+# (the page is a Next.js SPA). The workflow relies on a `sessionid` cookie
+# the operator extracts manually from a logged-in browser session and stores
+# in the KIDSNOTE_SESSION_COOKIE secret. That cookie typically lasts ~30 days.
 #
 # Dedup: each new Notion page records the kidsnote `Report ID`. Subsequent
 # runs query the DB once at startup and skip reports whose id is already
@@ -37,7 +35,7 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
-  # Auto-resume: a 1-year backfill can take 18-30 hours of compute,
+  # Auto-resume: a multi-year backfill can take days of compute,
   # but a GitHub-hosted runner caps a single job at 6 hours. Without
   # cron, the user would have to manually re-trigger after every cap.
   # With this schedule the workflow self-resumes every 4 hours; the
@@ -61,8 +59,8 @@ env:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    # Long timeout: a 1-year backfill with photo-heavy reports
-    # (avg 15-25 images/report + Ollama-driven LLM dashboards) ran past
+    # Long timeout: a multi-year backfill with photo-heavy reports
+    # (avg 15-25 images/report + Ollama-driven titles/dashboards) ran past
     # the 6h cap on the first try, so we ask for 12h. GitHub-hosted
     # runners cap public repos at 35 hours of wall-time per workflow.
     # Re-runs after the first backfill are fast (dedup skips done).
@@ -77,13 +75,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install fetcher deps + image helpers
+      - name: Install fetcher deps
         run: |
           python -m pip install --upgrade pip
           pip install -r tools/kidsnote_fetch/requirements.txt
-          # Pillow + piexif for in-memory EXIF strip + auto-compress
-          # to Notion's 5 MiB per-file cap.
-          pip install pillow piexif
 
       - name: Preflight guard
         run: |
@@ -99,11 +94,11 @@ jobs:
             exit 1
           fi
           if grep -Eiq '^[[:space:]]*(pillow|piexif)([[:space:]<>=!~]|$)' tools/kidsnote_fetch/requirements.txt; then
-            echo "::error::pillow/piexif must stay out of requirements.txt; workflow installs image helpers separately"
+            echo "::error::pillow/piexif must stay out of requirements.txt; media must be preserved without EXIF stripping or compression"
             exit 1
           fi
 
-      # ---- Ollama for body summary + LLM dashboards ----
+      # ---- Ollama for speaker-aware report titles + LLM dashboards ----
       # Local LLM runs inside the runner — no API key / cost.
       # gemma4:e4b is pinned by the preflight guard above so prompt behavior
       # and cache identity drift loudly instead of silently changing output.

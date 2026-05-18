@@ -14,7 +14,7 @@
 - 실행 워크플로: **`Kidsnote → Notion mirror`**
 - 기본 LLM 모델: **`gemma4:e4b`** (`OLLAMA_MODEL`로 고정, preflight guard로 검증)
 - 기본 저장소: **Notion DB**
-- 대용량 fallback: **Google Drive 선택 지원** — Notion 5MB 한도 초과 또는 Notion 업로드 실패 시 Drive에 올리고 Notion 페이지에 링크를 남김
+- 대용량 fallback: **Google Drive 원본 보존** — Notion 5MB 한도 초과 또는 Notion 업로드 실패 시 같은 bytes/파일명으로 Drive에 올리고 Notion 페이지에 링크를 남김
 - 필수 GitHub Secrets: `KIDSNOTE_SESSION_COOKIE`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
 - 선택 GitHub Secrets: `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON`
 
@@ -22,11 +22,11 @@
 
 ## 📸 이렇게 백업됩니다 (실제 결과 스크린샷)
 
-**알림장 한 건 — 4개 자동 callout + 원본 본문 + 사진/댓글**
+**알림장 한 건 — Gemma4 제목 요약 + 원본 본문 + 원본 파일 + 댓글**
 
-| 본문 + callout (요약·자녀일기·부모편지) | 사진 + 댓글 |
+| 알림장 본문 | 사진 + 댓글 |
 |:---:|:---:|
-| ![알림장 callout 페이지](images/%EC%B5%9C%EC%A2%85%20%EB%B0%B1%EC%97%85%20%EC%99%84%EB%A3%8C%20%ED%99%94%EB%A9%B4%201.png) | ![알림장 사진과 댓글](images/%EC%B5%9C%EC%A2%85%20%EB%B0%B1%EC%97%85%20%EC%99%84%EB%A3%8C%20%ED%99%94%EB%A9%B4%202.png) |
+| ![알림장 본문 페이지](images/%EC%B5%9C%EC%A2%85%20%EB%B0%B1%EC%97%85%20%EC%99%84%EB%A3%8C%20%ED%99%94%EB%A9%B4%201.png) | ![알림장 사진과 댓글](images/%EC%B5%9C%EC%A2%85%20%EB%B0%B1%EC%97%85%20%EC%99%84%EB%A3%8C%20%ED%99%94%EB%A9%B4%202.png) |
 
 **자동 생성되는 LLM 대시보드 — 시간순 마일스톤 + 월별 성장 스토리**
 
@@ -52,16 +52,17 @@
 
 - ✅ **완전 자동** — 4시간마다 cron이 새 알림장을 알아서 백업 (한 번 셋업하면 끝)
 - ✅ **7개 대시보드 자동 생성** — 월별 성장 스토리, 마일스톤, 분기별 관심사, 감사 카드 등 (LLM이 자동 작성)
-- ✅ **자녀 1인칭 일기·부모 편지** — 각 알림장에 자녀가 쓴 일기와 부모의 따뜻한 편지 자동 추가
+- ✅ **Gemma4 한줄요약 제목** — 본문 작성자와 댓글 작성자를 구분해서 알림장 제목을 자동 생성
 - ✅ 컴퓨터 켜둘 필요 없음 — GitHub의 클라우드 서버가 알아서 실행
 - ✅ 중복 알림장은 자동 skip — 매번 새것만 추가
-- ✅ 1년치 대용량 백업도 OK — 6시간 cap에 걸려도 cron이 자동 재개
-- ✅ 사진의 위치(GPS) 정보는 업로드 전에 자동 제거
+- ✅ 3년치 대용량 백업도 OK — 6시간 cap에 걸려도 cron이 자동 재개
+- ✅ 원본 파일 보존 — 키즈노트 원본 bytes, 파일명, EXIF/GPS metadata를 변경하지 않음
 - ✅ **무료** — GitHub와 노션의 무료 플랜으로 충분 (LLM도 무료 Ollama)
 
 > ⚠️ **노션 무료 플랜 5 MiB 파일 크기 제한**
-> - **사진**: 5MB 초과 시 자동으로 압축해서 업로드 (거의 100% 성공)
-> - **동영상·첨부파일**: 기본은 5MB **미만**만 노션에 업로드. 선택사항인 Google Drive fallback을 켜면 5MB 이상도 Drive 링크로 남깁니다.
+> - **사진·동영상·첨부파일**: 5MB 이하는 원본 그대로 Notion에 업로드합니다.
+> - 5MB 초과 또는 Notion 업로드 실패 파일은 Google Drive fallback이 켜져 있으면 원본 그대로 Drive에 보존하고 Notion에 링크를 남깁니다.
+> - fallback이 필요한데 Drive 설정이 없으면 조용히 건너뛰지 않고 실행을 실패시켜 다음 cron에서 재시도합니다.
 >
 > 노션 유료 플랜(파일당 5 GiB)을 쓰면 코드의 안전 한도를 조정해 더 크게 받을 수 있습니다.
 
@@ -140,7 +141,7 @@
 |-----------|----------|---------------|
 | **GitHub Actions** (public fork) | **무제한** | 매월 ~360분 (대시보드 갱신 포함) |
 | **GitHub Actions** (private fork) | 월 2,000분 | 첫 달 ~1,800분 (빠듯), 이후 ~360분 |
-| **노션 Personal** | 무제한 블록 + 파일당 5MB | 1년치 ~1-3GB |
+| **노션 Personal** | 무제한 블록 + 파일당 5MB | 3년치 ~3-9GB |
 | **Google Drive API** (선택) | 개인 Drive 저장공간 사용 | 5MB 초과 fallback 첨부만 |
 | **Ollama LLM** | GitHub 러너 안에서 무료 실행 | 외부 API 비용 0원 |
 
@@ -162,7 +163,7 @@
 내 노션 워크스페이스에 백업해두면:
 
 - 🔍 **검색됩니다** — "토끼 점토놀이"로 검색해서 그날의 알림장을 1초 만에
-- 📅 **정리됩니다** — 날짜순 자동 정렬, 1년치 모아보기
+- 📅 **정리됩니다** — 날짜순 자동 정렬, 여러 해의 기록 모아보기
 - 🔒 **영원합니다** — 키즈노트가 사라지든 졸업하든 그대로 내 것
 - 📸 **사진 원본 보존** — Kakao CDN에서 받은 원본 화질 그대로
 
@@ -174,31 +175,28 @@
 
 ### 1️⃣ 알림장 한 건 → 노션 페이지 한 장
 
-각 알림장 페이지는 **원본 본문 + 4개의 자동 callout**으로 구성됩니다:
+각 알림장 페이지는 **Gemma4가 만든 제목 + 키즈노트 원본 본문/댓글/파일**로 구성됩니다:
 
 ```
-[2026-03-31] 알림장: 👩‍🏫 🎵 음악 · 🌸 꽃 · 🧩 블록
-👩‍🏫 새싹2반 교사 · 새싹2반 · 작성 2026-03-31 · 🍽️ 정해진 식단 · 💤 1~1.5시간 ...
+[2026-03-31] 알림장: 선생님 새싹2반 교사 봄 색깔을 찾고 블록 기차를 만든 날
 
-💭 요약 (purple):     하린이와 함께 봄의 색깔을 찾아 놀고 블록으로 기차를 만든 활동.
-🧒 자녀의 일기 (yellow):  아~! 오늘 봄의 색깔을 찾는 놀이를 했어. 풍선 공이 너무 좋아서 웃었어!
-👨‍👩‍👧 부모의 편지 (pink):    하린아, 오늘 봄의 색깔을 찾으며 풍선 공을 만진 너의 모습이 보였단다...
-🌤️ 오늘의 날씨 (blue):  ⛅ 흐림
+🌤️ 키즈노트 입력 날씨: ⛅ 흐림
+👩‍🏫 선생님 새싹2반 교사 · 새싹2반 · 작성 2026-03-31 · 🍽️ 식사 정해진 식단 · 💤 수면 1~1.5시간 ...
 
 [원본 본문 — 선생님이 작성한 그대로]
 오늘은 봄의 색깔을 찾아보는 놀이를 하였습니다. 하얀 봉투와 파란...
 
 🍱 오늘의 식단 (사진 3장)
-📷 사진 12장 — EXIF GPS 자동 제거됨
+📷 사진 12장 — 키즈노트 원본 bytes/파일명/metadata 그대로
 💬 댓글 (3)
 ```
 
-- **💭 요약**: kiwipiepy(한국어 형태소 분석) + LLM 1줄 요약
-- **🧒 자녀의 일기**: 알림장을 자녀의 1인칭 시점으로 변환 (LLM)
-- **👨‍👩‍👧 부모의 편지**: 자녀가 자라서 봤을 때 감동받을 짧은 편지 (LLM)
-- **🌤️ 오늘의 날씨**: 알림장에 입력된 그대로 (추정 없음)
+- **제목 한줄요약**: Gemma4가 본문 작성자와 댓글 작성자를 구분해서 생성
+- **본문 내부 LLM callout 없음**: 요약, 자녀 일기, 부모 편지는 알림장 페이지 안에 넣지 않음
+- **🌤️ 키즈노트 입력 날씨**: Kidsnote 상세 API의 `weather` 필드만 사용, 부모 작성글 자동 날씨는 제외
+- **원본 파일 보존**: Notion/Drive 업로드 전 압축, 리사이즈, EXIF/GPS 제거를 하지 않음
 
-1년치 알림장(보통 300~400개)이 노션 DB 한 곳에 자동 정렬됩니다.
+3년치 알림장도 실행과 cron 재개를 통해 노션 DB 한 곳에 자동 정렬됩니다.
 
 ### 2️⃣ 자동 생성되는 7개 대시보드 (싱글톤 페이지)
 
@@ -228,13 +226,12 @@
             │  - 4시간마다 cron 자동 실행
             │  - 새 알림장 fetch + dedup
             ▼
-   사진 GPS 제거 → 5MB 초과시 자동 압축
-            │  - 선택 시 대용량 첨부는 Google Drive 링크로 fallback
+   원본 파일 그대로 업로드
+            │  - 5MB 초과/Notion 실패 파일은 Google Drive 원본 링크로 fallback
             │
             ▼
    Ollama (러너 안의 무료 LLM)       ← API 비용 0원
-            │  - 자녀 1인칭 일기 변환
-            │  - 부모 편지 작성
+            │  - 작성자/댓글 맥락을 이해한 알림장 제목 생성
             │  - 4개 대시보드 (성장/마일스톤/관심사/감사) 생성
             ▼
    내 노션 DB                       ← 나만 접근 가능
@@ -251,9 +248,9 @@
 | 실행 위치 | 로컬 개발 후 GitHub Actions 클라우드에서 `Kidsnote → Notion mirror` 실행 |
 | LLM 모델 | `gemma4:e4b`로 고정. workflow preflight에서 모델명과 cache key를 로그로 출력하고 다른 모델이면 실패 |
 | Ollama cache | `OLLAMA_CACHE_KEY=ollama-gemma4-e4b-v2` |
-| Python 의존성 | `requests`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트. `Pillow`/`piexif`는 workflow에서 별도 설치 |
-| Notion 업로드 | Notion `file_uploads` API 사용, 사진은 EXIF GPS 제거 후 5MB 이하로 압축 |
-| Google Drive fallback | 선택 기능. 대용량 동영상/PDF 또는 Notion 업로드 실패 파일을 Drive에 올리고 Notion에는 외부 링크로 삽입 |
+| Python 의존성 | `requests`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트 |
+| Notion 업로드 | Notion `file_uploads` API 사용. 원본 bytes/파일명/EXIF를 변경하지 않음 |
+| Google Drive fallback | 대용량 또는 Notion 업로드 실패 파일을 같은 bytes/파일명으로 Drive에 올리고 Notion에는 외부 링크로 삽입 |
 | 권한 설계 | GitHub에는 Google 계정 비밀번호를 넣지 않음. 서비스 계정 JSON만 Secret에 넣고, 해당 서비스 계정에 공유한 Drive 폴더만 접근 |
 
 관련 파일:
@@ -274,10 +271,10 @@
 | 단계 | 사용자가 직접 클릭하는 시간 | 백그라운드에서 알아서 도는 시간 |
 |------|------|------|
 | **0~8단계 셋업** | **15~25분** ← 여기만 손이 감 | - |
-| **첫 풀 백업 (1년치)** | 0분 (그냥 켜만 두면 됨) | **18~30시간** (cron이 자동으로) |
+| **첫 풀 백업 (3년치)** | 0분 (그냥 켜만 두면 됨) | **54~90시간** (cron이 자동으로) |
 | **이후 운영** | 0분 / 한 달에 쿠키 갱신 3분 | 4시간마다 새 알림장 자동 체크 |
 
-> 💡 **솔직히 말씀드리면**: README 한 번 정독하고 시작하면 셋업 25분, 그 다음 점심 먹고 자고 하면 다음날 아침에는 1년치가 다 백업돼 있어요. 사용자가 직접 옆에 붙어있을 일은 거의 없습니다.
+> 💡 **솔직히 말씀드리면**: README 한 번 정독하고 시작하면 셋업 25분, 그 다음은 GitHub Actions가 4시간 cron으로 며칠에 걸쳐 이어서 처리합니다. 사용자가 직접 옆에 붙어있을 일은 거의 없습니다.
 
 ### 진행 표시기
 
@@ -346,7 +343,7 @@
 
 > 💡 **Public vs Private fork** — 기본값(public)이 권장됩니다.
 > - **Public** (기본): GitHub Actions 무제한 무료 사용 가능. **개인정보(쿠키·토큰)는 Secrets에 분리 저장**되어 코드 공개와 무관하게 안전.
-> - **Private**: 월 2,000분 Actions 무료 한도. 1년치 첫 백업이 18~30시간 걸리면 첫 달은 빠듯할 수 있어요. (이후 매일 incremental은 ~10분/일이라 무관)
+> - **Private**: 월 2,000분 Actions 무료 한도. 3년치 첫 백업은 54~90시간까지 갈 수 있어 첫 달 한도를 넘을 수 있어요. (이후 incremental은 짧음)
 
 ### ❓ 막혔다면
 
@@ -728,11 +725,12 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 #### C. 작동 방식
 
 - `GOOGLE_DRIVE_FOLDER_ID`와 `GOOGLE_SERVICE_ACCOUNT_JSON`이 둘 다 있으면 Drive fallback이 켜집니다.
-- 사진은 먼저 EXIF GPS 제거와 JPEG 압축을 시도하고, 그래도 5MB를 넘거나 Notion 업로드가 실패하면 Drive fallback을 시도합니다.
-- 동영상/PDF/엑셀 등 일반 첨부는 5MB를 넘으면 Notion 직접 업로드 대신 Drive fallback을 시도합니다.
+- 사진·동영상·PDF·엑셀 등 모든 파일은 키즈노트 `original` URL에서 받은 bytes와 원본 파일명을 그대로 사용합니다.
+- 5MB를 넘거나 Notion 직접 업로드가 실패하면 같은 bytes/파일명으로 Drive fallback을 시도합니다.
+- Drive fallback 설정이 없거나 Drive 업로드가 실패하면 해당 파일을 조용히 건너뛰지 않고 실행을 실패시켜 다음 cron에서 재시도합니다.
 - fallback으로 Drive에 올라간 파일은 Notion에서 열 수 있도록 해당 파일에 `anyone reader` 권한이 붙습니다. 즉, **내 Drive 전체가 공개되는 것이 아니라 fallback으로 업로드된 개별 파일만 링크 열람 가능** 상태가 됩니다.
 
-이 2개가 없으면 기존처럼 노션 업로드만 시도합니다.
+5MB를 넘는 파일이 전혀 없고 Notion 업로드가 모두 성공하면 Drive 설정 없이도 동작합니다. 대용량까지 누락 없이 보존하려면 이 2개 Secret을 설정하세요.
 
 ### ❓ 막혔다면
 
@@ -793,6 +791,7 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 > | 50개 미만 (몇 달치) | 5~30분 | 1회 |
 > | 100~200개 (반년) | 4~10시간 | 1~2회 |
 > | 300~400개 (1년치) + 사진 많음 | **18~30시간** | **3~5회** |
+> | 900~1200개 (3년치) + 사진 많음 | **54~90시간** | **10~18회** |
 >
 > GitHub-hosted runner는 단일 job **6시간 하드 캡**이 있어서 한 번에 못 끝낼 수 있어요.
 
@@ -806,7 +805,7 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 4. 알림장 다 백업되면 매 4시간 cron은 1~2분 만에 끝남 (할 일 없으니 immediately exit)
 5. 새 알림장 생기면 다음 4시간 안에 자동으로 백업
 
-**즉, 사용자가 매번 재실행 안 해도 됩니다**. 1년치 30시간이 걸려도 7~8회 cron 자동 사이클로 끝까지 진행됩니다.
+**즉, 사용자가 매번 재실행 안 해도 됩니다**. 3년치 백업이 며칠 걸려도 cron 자동 사이클로 끝까지 진행됩니다.
 
 ```
 시각 (UTC)        무엇이 일어나는가
@@ -824,7 +823,7 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz
 1. **알림장·공지·앨범·식단 publish** — 새 페이지 생성 (시간 大, 사진 업로드 포함)
 2. **7개 대시보드 자동 생성** — 통계/추억/영양 + 4개 LLM 페이지 (성장 스토리/마일스톤/관심사/감사 카드). 새 알림장이 publish되면 LLM 대시보드도 자동 갱신
 
-> 💡 **`force_refresh` 옵션** (고급): 코드 업데이트 후 기존 알림장의 callout(자녀 일기/부모 편지)도 새 LLM prompt로 다시 만들고 싶으면, `Run workflow`에서 `force_refresh`를 `true`로 설정. **첫 백업과 동일한 시간 소요** (모든 페이지를 archive 후 재발행). 마찬가지로 4시간 cron 자동 재개로 끝까지 진행됨.
+> 💡 **`force_refresh` 옵션** (고급): 제목 생성 prompt나 페이지 구조가 바뀐 뒤 기존 알림장도 새 형식으로 다시 만들고 싶으면, `Run workflow`에서 `force_refresh`를 `true`로 설정. **첫 백업과 동일한 시간 소요** (모든 페이지를 archive 후 재발행). 마찬가지로 4시간 cron 자동 재개로 끝까지 진행됨.
 >
 > 일반 사용자는 `force_refresh=false` (기본값)로 충분합니다.
 
@@ -866,8 +865,8 @@ GitHub Actions는 종종 네트워크 이슈로 중간에 멈출 수 있어요. 
 ✅ **8단계 최종 성공 신호**:
 - Actions 페이지에서 워크플로 옆 동그라미가 **녹색 체크 ✅** + `succeeded`
 - 노션 DB로 돌아가서 보면 알림장들이 날짜순으로 들어가 있음
-- 페이지 클릭하면 본문 + 4개 callout(💭 요약 / 🧒 자녀 일기 / 👨‍👩‍👧 부모 편지 / 🌤️ 날씨) + 사진 + 첨부파일 정상 표시
-- 사진 클릭하면 원본 화질로 열림
+- 페이지 클릭하면 최상단 날씨 callout(입력된 경우) + 작성자/생활기록 + 원본 본문 + 사진 + 첨부파일 + 댓글 정상 표시
+- 사진 클릭하면 키즈노트 원본 파일명/bytes/metadata로 백업된 파일이 열림
 - DB 안에 자동 생성된 **7개 대시보드** 페이지도 보임 (📊 통계 / 📅 추억 / 🥗 영양 / 📖 성장 스토리 / 🌟 마일스톤 / 🌱 관심사 / 💌 선생님께)
 
 ✅ **이제 끝**: 셋업 끝났습니다. 이 시점부터는 **사용자가 할 일이 없어요**.
@@ -1007,14 +1006,14 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 
 ### 코드 업데이트 후 권장 작업
 
-업데이트가 **LLM prompt 개선** 같은 경우, 기존 알림장의 callout(자녀 일기/부모 편지)은 옛 prompt로 만들어진 상태입니다. 새 prompt로 다시 만들고 싶으면:
+업데이트가 **LLM 제목 prompt 개선**이나 페이지 구조 변경 같은 경우, 기존 알림장 페이지는 옛 형식으로 남아 있습니다. 새 형식으로 다시 만들고 싶으면:
 
 1. Sync fork 완료 후
 2. **`Actions`** → **`Kidsnote → Notion mirror`** → **`Run workflow`**
 3. **`force_refresh`** 를 **`true`** 로 변경 → 녹색 버튼 클릭
 4. 첫 백업과 같은 시간(18~30시간) 소요. cron 자동 재개로 끝까지 진행됨
 
-> ⚠️ **force_refresh를 켤지 결정하는 기준**: 이미 노션에 잘 채워져 있고 큰 불만 없으면 그냥 둬도 됩니다. 새 prompt가 기존 callout을 더 좋게 만든다는 확신이 있을 때만 force_refresh.
+> ⚠️ **force_refresh를 켤지 결정하는 기준**: 이미 노션에 잘 채워져 있고 큰 불만 없으면 그냥 둬도 됩니다. 제목/본문 구조를 새 정책으로 통일하고 싶을 때만 force_refresh.
 
 ---
 
@@ -1026,9 +1025,9 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 
 - **GitHub Actions**:
   - **public repo**: **무제한 무료** (이 프로젝트는 fork도 public 상태로 두면 됨 — 비밀 값은 Secrets로 분리되어 안전)
-  - **private fork**: 월 2,000분 무료. 1년치 초기 백업이 18~30시간(~1,800분) 걸리니 첫 달만 빠듯할 수 있어요. **그래서 처음엔 public fork를 권장** (개인정보는 모두 Secrets에 들어가니 코드만 공개되는 형태)
+  - **private fork**: 월 2,000분 무료. 3년치 초기 백업은 54~90시간까지 갈 수 있어 첫 달 한도를 넘을 수 있어요. **그래서 처음엔 public fork를 권장** (개인정보는 모두 Secrets에 들어가니 코드만 공개되는 형태)
   - 두 번째 이후 incremental run은 한 번에 1~5분 정도라 무료 한도와 무관
-- **노션**: 무료 플랜으로 충분 (1년치 알림장 + 사진이 1~3 GB 정도, 노션 무료 한도 안)
+- **노션**: 무료 플랜으로 충분 (3년치 알림장 + 사진이 대략 3~9 GB 규모여도 블록/저장 구조상 보관 가능)
 - **LLM (대시보드 생성)**: Ollama가 GitHub Actions 러너 안에서 실행되어 **외부 API 비용 0원**. 모델은 영구 캐싱되어 첫 풀 후엔 빠름
 
 ### 자녀가 둘 이상이면?
@@ -1059,27 +1058,25 @@ Notion mirror: 350 total fetched, 342 already in DB (skip), 8 to publish
 
 ### 사진이 너무 큰데 괜찮나요?
 
-노션 무료 플랜은 파일당 5 MiB(약 5MB) 한도입니다. **사진**의 경우 코드가 자동으로:
+노션 무료 플랜은 파일당 5 MiB(약 5MB) 한도입니다. 이 버전은 사진을 압축하거나 EXIF/GPS를 제거하지 않습니다.
 
-1. EXIF 위치(GPS) 정보 제거
-2. 1920px로 리사이즈
-3. JPEG 품질 단계적 축소 (85 → 60)
-
-키즈노트의 일반 iPhone/Android 사진(3~8MB)은 100% 통과합니다.
+- 5MB 이하 사진은 키즈노트 원본 bytes와 파일명 그대로 Notion에 업로드합니다.
+- 5MB 초과 사진은 Google Drive fallback이 켜져 있으면 원본 그대로 Drive에 업로드하고 Notion에 링크로 삽입합니다.
+- Drive fallback이 필요한데 설정이 없으면 실행이 실패합니다. 그래야 누락된 파일이 조용히 사라지지 않고 다음 cron에서 재시도됩니다.
 
 ### 동영상이나 PDF·엑셀도 백업되나요?
 
-**5MB 미만**은 노션 페이지에 그대로 업로드됩니다. 5MB 이상은 기본적으로 skip되지만, 7-4단계의 Google Drive fallback을 설정하면 Drive에 올린 뒤 노션 페이지에 링크로 남깁니다.
+**5MB 이하**는 노션 페이지에 그대로 업로드됩니다. 5MB 초과 또는 Notion 업로드 실패 파일은 Google Drive fallback을 설정했을 때 같은 bytes/파일명으로 Drive에 올라가고, 노션 페이지에는 링크로 남습니다. fallback이 없으면 skip하지 않고 실패 처리합니다.
 
 | 첨부 종류 | 5MB 미만 | 5MB 이상 |
 |---|---|---|
-| 📷 사진 | ✅ 그대로 업로드 | ✅ 자동 압축 후 업로드 |
-| 🎬 동영상 | ✅ 그대로 업로드 (`동영상` 섹션) | ✅ Drive fallback 설정 시 링크 보존 / 미설정 시 skip |
-| 📎 PDF·엑셀 등 | ✅ 그대로 업로드 (`첨부 파일` 섹션) | ✅ Drive fallback 설정 시 링크 보존 / 미설정 시 skip |
+| 📷 사진 | ✅ 원본 그대로 업로드 | ✅ Drive fallback 설정 시 원본 링크 보존 / 미설정 시 실행 실패 |
+| 🎬 동영상 | ✅ 원본 그대로 업로드 (`동영상` 섹션) | ✅ Drive fallback 설정 시 원본 링크 보존 / 미설정 시 실행 실패 |
+| 📎 PDF·엑셀 등 | ✅ 원본 그대로 업로드 (`첨부 파일` 섹션) | ✅ Drive fallback 설정 시 원본 링크 보존 / 미설정 시 실행 실패 |
 
-워크플로 로그에서 skip된 게 있으면 다음과 같이 표시:
+Drive fallback 설정이 필요한데 없으면 로그에 다음처럼 명확히 남고 해당 run은 실패합니다:
 ```
-WARNING video 5월_운동회.mp4 is 12340567 bytes > 5000000 cap; skipping (Notion free tier limit)
+video 5월_운동회.mp4 cannot fit in Notion and Google Drive fallback is not configured
 ```
 
 Drive fallback이 켜져 있으면 대신 `uploaded ... to Google Drive fallback` 로그가 보입니다. **노션 유료 플랜**(Plus 이상)은 파일당 5 GiB까지 가능하지만, 이 코드의 기본 안전 한도는 5MB라서 큰 파일을 노션에 직접 넣으려면 한도 값을 별도로 조정해야 합니다.
@@ -1122,7 +1119,7 @@ Drive fallback이 켜져 있으면 대신 `uploaded ... to Google Drive fallback
 - Google Drive fallback을 켠 경우, Notion 5MB 제한을 넘거나 Notion 업로드가 실패한 첨부만 사용자가 지정한 Drive 폴더에 저장됨
 - Drive fallback 파일은 Notion에서 열 수 있도록 개별 파일에 링크 열람 권한이 붙음. 내 Google Drive 전체가 공개되는 것은 아님
 - 워크플로 실행이 끝나면 GitHub 측 임시 데이터는 즉시 삭제
-- **위치 정보(GPS)는 노션 업로드 전에 제거** — 노션 측에도 위치 흔적 없음
+- **위치 정보(GPS)는 제거하지 않음** — 키즈노트 원본 파일의 metadata를 그대로 보존
 - 코드 전체가 **MIT 라이선스** 오픈소스 — fork한 본인이 직접 검토 가능 (Python 약 4,000줄, `tools/kidsnote_fetch/`)
 
 ### 노션 한국어 UI랑 다른데요?
@@ -1148,7 +1145,7 @@ UI는 노션이 가끔 바뀝니다. 메뉴 이름이 달라도 다음 기능을
 | `Notion DB not found` / `404` | DB ID 틀림 또는 4단계 통합 연결 누락 | 5단계 DB ID 다시 확인 + 4단계 연결 확인 |
 | `Database not connected to integration` | 4단계 빠뜨림 | 4단계 진행 |
 | 워크플로가 5분 만에 fail | 코드 import 에러 — fork가 오래된 코드일 가능성 | fork 페이지에서 `Sync fork` 클릭해서 최신 코드 가져오기 |
-| 노션 페이지에 사진이 안 보임 | 노션 무료 한도(스토리지) 초과 또는 5MB 이상 사진 | 노션 워크스페이스 스토리지 사용량 확인. 사진은 자동 압축됨 |
+| 노션 페이지에 사진이 안 보임 | 노션 무료 한도(스토리지) 초과, 5MB 이상 사진, 또는 Drive fallback 미설정 | 노션 스토리지와 Drive fallback Secret 확인. 사진은 압축하지 않고 원본 보존 |
 | `Google Drive fallback secret could not be parsed` | `GOOGLE_SERVICE_ACCOUNT_JSON` 값이 JSON 전체가 아니거나 붙여넣기 중 깨짐 | 서비스 계정 JSON 파일 전체를 다시 Secret에 붙여넣기 |
 | `Google Drive fallback upload failed ... File not found` | `GOOGLE_DRIVE_FOLDER_ID`가 틀렸거나 서비스 계정에 폴더 편집 권한이 없음 | Drive 폴더 ID 확인 + 폴더를 JSON의 `client_email`에 편집자로 공유 |
 | `OLLAMA_MODEL must be gemma4:e4b` | workflow 모델 값이 바뀜 | `.github/workflows/kidsnote-to-notion.yml`의 `OLLAMA_MODEL`을 `gemma4:e4b`로 복구 |
@@ -1168,7 +1165,7 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/stylisk
 # 🛠️ 기술 스택 (개발자용)
 
 **런타임**
-- Python 3.12 (+ `requests`, `browser-cookie3`, `kiwipiepy`, `google-api-python-client`, `google-auth`; workflow에서 `Pillow`, `piexif` 별도 설치)
+- Python 3.12 (+ `requests`, `browser-cookie3`, `kiwipiepy`, `google-api-python-client`, `google-auth`)
 - GitHub Actions (ubuntu-latest, 단일 job 6h hard-cap)
 - Notion API `2022-06-28` (`file_uploads` + `databases` + 100-children chunked PATCH)
 - Google Drive API (선택): `drive.file` scope로 Notion 5MB 제한 또는 업로드 실패 시 외부 링크 fallback
@@ -1177,12 +1174,12 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/stylisk
 
 **핵심 코드** ([`tools/kidsnote_fetch/`](tools/kidsnote_fetch/), 약 4000줄):
 - `fetch.py` — 키즈노트 API 호출 + 메인 로직 + dashboard 라우팅
-- `notion_mirror.py` — 노션 DB 쓰기 + 이미지 압축 + EXIF strip + 7개 dashboard 생성 + LLM 호출 + 한국어 호칭 헬퍼(`_addressee`/`_vocative_marker`)
+- `notion_mirror.py` — 노션 DB 쓰기 + 원본 파일 보존 업로드 + 7개 dashboard 생성 + Gemma4 제목/대시보드 LLM 호출
 - `requirements.txt` — Python 의존성
 
 **LLM 파이프라인**:
-- kiwipiepy → 알림장 본문에서 명사 추출, 제목 키워드 자동 생성
-- gemma4:e4b → 자녀 일기 1인칭 변환, 부모 편지, 4개 대시보드 (성장 스토리/마일스톤/관심사/감사 카드)
+- gemma4:e4b → 알림장 제목 한줄요약, 4개 대시보드 (성장 스토리/마일스톤/관심사/감사 카드)
+- kiwipiepy → 통계/카테고리 보조 분류
 - 후처리: `_strip_lead_meta` (메타 lead-in 자동 제거), `_strip_cjk` (한자 누수 차단, >20%면 reject), `_extract_after_final_label` (분석+본문 분리), few-shot 예시 누수 가드, 명사구/문장형 자동 분류
 
 **옵션 플래그**:
