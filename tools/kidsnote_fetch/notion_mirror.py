@@ -1331,6 +1331,37 @@ class NotionMirror:
             return title[:suffix.start()].rstrip()
         return title
 
+    @staticmethod
+    def _parse_comment_time(comment: dict[str, Any]) -> datetime | None:
+        for key in ("created", "date_created", "created_at", "modified", "date_modified", "updated_at"):
+            raw = comment.get(key)
+            if not raw:
+                continue
+            try:
+                return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        return None
+
+    @classmethod
+    def _sort_comments(cls, comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Kidsnote comments can arrive newest-first; use chronological order."""
+        if len(comments) < 2:
+            return list(comments)
+
+        def key(item: tuple[int, dict[str, Any]]) -> tuple[int, float, int]:
+            idx, comment = item
+            created = cls._parse_comment_time(comment)
+            if created is not None:
+                return (0, created.timestamp(), idx)
+            try:
+                cid = int(comment.get("id"))
+            except (TypeError, ValueError):
+                return (2, float(idx), idx)
+            return (1, float(cid), idx)
+
+        return [comment for _, comment in sorted(enumerate(comments), key=key)]
+
     @classmethod
     def _speaker_context(
         cls,
@@ -1343,7 +1374,7 @@ class NotionMirror:
             f"본문 작성자: {body_author}",
             f"본문: {body or '(본문 없음)'}",
         ]
-        for idx, comment in enumerate(comments, 1):
+        for idx, comment in enumerate(cls._sort_comments(comments), 1):
             c_author = cls._author_display(comment, emoji=False) or "댓글 작성자"
             content = (comment.get("content") or "").strip()
             if not content and comment.get("emoticon_content"):
@@ -1366,6 +1397,7 @@ class NotionMirror:
         full_prompt = (
             "키즈노트 알림장 제목을 한국어 한 줄로만 작성하세요. "
             "본문 작성자와 댓글 작성자를 구분하고, 댓글 작성자가 본문 행동을 한 것처럼 쓰지 마세요. "
+            "댓글은 오래된 순서대로 제공되므로 대화 흐름을 시간순으로 이해하세요. "
             "'원'은 어린이집/기관일 수 있습니다. "
             "작성자 이름/역할을 괄호로 반복하지 말고, 이모지와 설명 없이 제목만 출력하세요.\n\n"
             "[예시]\n"
@@ -1381,6 +1413,7 @@ class NotionMirror:
             "키즈노트 알림장을 한 줄 제목으로 요약하세요. "
             "한국어만 쓰고, 제목 문장 하나만 출력하세요. "
             "본문 작성자와 댓글 작성자를 혼동하지 마세요. "
+            "댓글은 오래된 순서대로 제공됩니다. "
             "작성자 이름/역할을 괄호로 덧붙이지 마세요.\n\n"
             f"{context[:900]}\n\n"
             "제목:"
@@ -1417,7 +1450,7 @@ class NotionMirror:
         body = (report.get("content") or "").strip()
         if body:
             candidates.append(body)
-        for comment in comments:
+        for comment in cls._sort_comments(comments):
             content = (comment.get("content") or "").strip()
             if content:
                 candidates.append(content)
@@ -1783,7 +1816,7 @@ class NotionMirror:
                 if strict:
                     raise RuntimeError(f"comment fetch returned HTTP {r.status_code}")
                 return []
-            return r.json().get("results") or []
+            return NotionMirror._sort_comments(r.json().get("results") or [])
         except Exception as e:
             if strict:
                 raise RuntimeError(f"comment fetch failed for {kind} id={item_id}: {e}") from e
@@ -1809,7 +1842,7 @@ class NotionMirror:
                 "text": {"content": f"💬 댓글 ({len(comments)})"},
             }]},
         }]
-        for c in comments:
+        for c in self._sort_comments(comments):
             author = c.get("author") or {}
             atype = author.get("type") or ""
             prefix = {"teacher": "👩‍🏫", "parent": "👨‍👩‍👧", "admin": "🏫"}.get(atype, "")

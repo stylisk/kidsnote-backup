@@ -625,7 +625,11 @@ def _run_title_quality_check(
             _LOGGER.error("Title QA %d/%d: detail fetch failed id=%s", idx, len(reports), report_id)
             failures += 1
             continue
-        comments = _list_comments(sess, "reports", report_id) if detail.get("num_comments") else []
+        comments = (
+            NotionMirror._sort_comments(_list_comments(sess, "reports", report_id))
+            if detail.get("num_comments")
+            else []
+        )
         oneliner = NotionMirror._title_oneliner(detail, comments)
         flags = _title_quality_flags(oneliner)
         if flags:
@@ -647,7 +651,7 @@ def _run_title_quality_check(
         print(f"author: {author}")
         print(f"body: {body or '(본문 없음)'}")
         if comments:
-            print(f"comments: {len(comments)}")
+            print(f"comments: {len(comments)} (oldest first)")
             for cidx, comment in enumerate(comments, 1):
                 c_author = NotionMirror._author_display(comment, emoji=False) or "댓글 작성자"
                 c_body = _plain_text(comment.get("content"), max_chars=source_chars)

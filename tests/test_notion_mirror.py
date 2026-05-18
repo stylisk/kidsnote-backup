@@ -217,6 +217,33 @@ class NotionMirrorTests(unittest.TestCase):
             "교사가 놀이 활동 공유",
         )
 
+    def test_speaker_context_sorts_comments_oldest_first(self) -> None:
+        report = {
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "오늘 낮잠을 잘 잤어요.",
+        }
+        comments = [
+            {
+                "id": 3,
+                "created": "2026-05-18T13:00:00+09:00",
+                "author": {"type": "teacher", "name": "물빛1반 교사"},
+                "author_name": "물빛1반 교사",
+                "content": "오늘 아주 잘 잤어요.",
+            },
+            {
+                "id": 2,
+                "created": "2026-05-18T12:00:00+09:00",
+                "author": {"type": "parent", "name": "정이담 엄마"},
+                "author_name": "정이담 엄마",
+                "content": "요즘 낮잠을 잘 자나요?",
+            },
+        ]
+
+        context = NotionMirror._speaker_context(report, comments)
+
+        self.assertLess(context.index("댓글 1: 요즘 낮잠을 잘 자나요?"), context.index("댓글 2: 오늘 아주 잘 잤어요."))
+
     def test_title_quality_helpers_flag_suspicious_titles(self) -> None:
         self.assertEqual(kidsnote_fetch._plain_text("<p>원문입니다</p>", max_chars=0), "(hidden)")
         self.assertEqual(kidsnote_fetch._title_quality_flags("아빠가 원님으로 데리러 감"), ["suspicious_won_nim"])
