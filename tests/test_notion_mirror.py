@@ -5,6 +5,7 @@ import sys
 import types
 import unittest
 import json
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools" / "kidsnote_fetch"))
 
 import fetch as kidsnote_fetch  # noqa: E402
+import full_local_export as full_local_export  # noqa: E402
+import media_filename as media_filename  # noqa: E402
 import notion_mirror as nm  # noqa: E402
 from notion_mirror import MediaBackupError, NotionMirror  # noqa: E402
 
@@ -394,6 +397,97 @@ class NotionMirrorTests(unittest.TestCase):
         image_blocks = [b for b in page["children"] if b.get("type") == "image"]
         self.assertEqual(image_blocks[0]["image"], {"type": "file_upload", "file_upload": {"id": "upload-1"}})
 
+    def test_generic_kidsnote_image_names_are_generated_for_notion(self) -> None:
+        raw1 = b"GPS-ORIGINAL-BYTES-1"
+        raw2 = b"GPS-ORIGINAL-BYTES-2"
+        url1 = "https://cdn.kidsnote.test/a/img.jpg?signature=one"
+        url2 = "https://cdn.kidsnote.test/b/img.jpg?signature=two"
+        report = {
+            "id": 1240611501,
+            "date_written": "2025-06-30",
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "사진 두 장입니다.",
+            "attached_images": [
+                {"id": 1, "original": url1, "original_file_name": "img.jpg"},
+                {"id": 2, "original": url2, "original_file_name": "img.jpg"},
+            ],
+        }
+
+        with patch.object(NotionMirror, "_title_oneliner", return_value="사진 두 장을 보냄"):
+            mirror = make_mirror()
+            kidsnote = FakeKidsnoteSession(media={url1: raw1, url2: raw2})
+            mirror.publish_report(report, kidsnote)
+
+        expected = [
+            "2025-06-30_kidsnote_1240611501_0001.jpg",
+            "2025-06-30_kidsnote_1240611501_0002.jpg",
+        ]
+        self.assertEqual([x["filename"] for x in mirror.session.upload_creates], expected)
+        self.assertEqual([x["filename"] for x in mirror.session.uploads], expected)
+        media_files = mirror.session.pages[0]["properties"]["Files & media"]["files"]
+        self.assertEqual([x["name"] for x in media_files], expected)
+        self.assertEqual(mirror.session.uploads[0]["raw"], raw1)
+        self.assertEqual(mirror.session.uploads[1]["raw"], raw2)
+
+    def test_hybrid_filename_keeps_meaningful_kidsnote_name(self) -> None:
+        resolved = media_filename.resolve_media_filename(
+            {"original_file_name": "물놀이 참여 안내문001.jpg"},
+            "https://cdn.kidsnote.test/path/img.jpg",
+            kind="image",
+            item_id=1262050939,
+            item_date="2025-08-18",
+            sequence=1,
+        )
+
+        self.assertEqual(resolved.filename, "물놀이 참여 안내문001.jpg")
+        self.assertFalse(resolved.generated)
+
+    def test_local_repair_renames_generic_image_without_changing_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            item = root / "child_1" / "reports" / "2025-06-30_report_1240611501_teacher"
+            media_dir = item / "media" / "images" / "7465139834"
+            media_dir.mkdir(parents=True)
+            raw = b"EXIF-GPS-BYTES"
+            old_file = media_dir / "img.jpg"
+            old_file.write_bytes(raw)
+            (item / "report.json").write_text(
+                json.dumps({"id": 1240611501, "date_written": "2025-06-30"}),
+                encoding="utf-8",
+            )
+            attachment = {
+                "kind": "images",
+                "index": 1,
+                "filename": "img.jpg",
+                "filename_source": "original_file_name",
+                "path": str(old_file),
+                "url_without_query": "https://cdn.kidsnote.test/a/img.jpg",
+                "object": {
+                    "id": 7465139834,
+                    "original": "https://cdn.kidsnote.test/a/img.jpg",
+                    "original_file_name": "img.jpg",
+                },
+            }
+            (media_dir / "attachment.json").write_text(
+                json.dumps(attachment, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (item / "media_manifest.json").write_text("[]", encoding="utf-8")
+
+            totals = full_local_export.repair_backup_filenames(root)
+
+            new_file = media_dir / "2025-06-30_kidsnote_1240611501_0001.jpg"
+            self.assertEqual(totals["renamed"], 1)
+            self.assertFalse(old_file.exists())
+            self.assertEqual(new_file.read_bytes(), raw)
+            repaired = json.loads((media_dir / "attachment.json").read_text(encoding="utf-8"))
+            self.assertEqual(repaired["filename"], new_file.name)
+            self.assertEqual(repaired["source_filename"], "img.jpg")
+            self.assertTrue(repaired["filename_generated"])
+            manifest = json.loads((item / "media_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest[0]["filename"], new_file.name)
+
     def test_drive_fallback_preserves_bytes_and_filename_or_fails_loudly(self) -> None:
         raw = b"abcdef"
         mirror = make_mirror(max_image_bytes=3)
@@ -497,6 +591,29 @@ class NotionMirrorTests(unittest.TestCase):
         media_prop = page["properties"]["Files & media"]["files"][0]
         self.assertEqual(media_prop["name"], "MENU_20260514.JPG")
         self.assertEqual(media_prop["file_upload"]["id"], "upload-1")
+
+    def test_generic_menu_image_name_uses_menu_id_sequence(self) -> None:
+        raw = b"MENU-IMAGE-BYTES"
+        original_url = "https://cdn.kidsnote.test/menu/img.jpg"
+        menu = {
+            "id": 44281101,
+            "date_menu": "2024-11-20",
+            "lunch": "밥\n국",
+            "lunch_img": {
+                "original": original_url,
+                "original_file_name": "img.jpg",
+            },
+        }
+
+        mirror = make_mirror()
+        kidsnote = FakeKidsnoteSession(media={original_url: raw})
+        mirror.publish_menu(menu, kidsnote)
+
+        expected = "2024-11-20_kidsnote_44281101_0001.jpg"
+        self.assertEqual(mirror.session.upload_creates[0]["filename"], expected)
+        self.assertEqual(mirror.session.uploads[0]["filename"], expected)
+        page = mirror.session.pages[0]
+        self.assertEqual(page["properties"]["Files & media"]["files"][0]["name"], expected)
 
     def test_missing_original_url_is_a_media_backup_failure(self) -> None:
         with self.assertRaises(MediaBackupError):

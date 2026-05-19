@@ -30,6 +30,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 import requests
+from media_filename import resolve_media_filename
 
 # Lazy-loaded global kiwipiepy instance. The first call to ``_get_kiwi()``
 # initializes the analyzer (loads the Korean morphology dictionary; ~80MB
@@ -271,7 +272,6 @@ NOTION_VERSION = "2022-06-28"
 DEFAULT_MAX_IMAGE_BYTES = 5_000_000   # Notion free-tier per-file cap.
 MAX_BLOCK_TEXT = 1900                 # Notion paragraph rich_text limit (2000).
 EXTERNAL_REF_PREFIX = "external:"
-FILENAME_KEYS = ("original_file_name", "file_name", "filename", "name")
 FILES_NAME_CANDIDATES = (
     "Files & media",
     "Files",
@@ -664,12 +664,21 @@ class NotionMirror:
         url: str,
         *,
         kind: str,
+        item_id: Any | None = None,
+        item_date: Any | None = None,
+        sequence: int | None = None,
     ) -> str:
-        if isinstance(obj, dict):
-            for key in FILENAME_KEYS:
-                value = obj.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+        resolved = resolve_media_filename(
+            obj,
+            url,
+            kind=kind,
+            item_id=item_id,
+            item_date=item_date,
+            sequence=sequence,
+            fallback=f"{kind}.bin",
+        )
+        if resolved.filename:
+            return resolved.filename
         basename = unquote(urlparse(url).path.rsplit("/", 1)[-1]).strip()
         if basename:
             return basename
@@ -921,9 +930,19 @@ class NotionMirror:
         *,
         kind: str,
         timeout: int,
+        item_id: Any | None = None,
+        item_date: Any | None = None,
+        sequence: int | None = None,
     ) -> tuple[str, str]:
         url = self._original_url(obj, kind=kind)
-        filename = self._original_filename(obj, url, kind=kind)
+        filename = self._original_filename(
+            obj,
+            url,
+            kind=kind,
+            item_id=item_id,
+            item_date=item_date,
+            sequence=sequence,
+        )
         raw = self._download_original_media(
             kidsnote_sess, url, kind=kind, filename=filename, timeout=timeout,
         )
@@ -2067,6 +2086,9 @@ class NotionMirror:
             "type": "heading_3",
             "heading_3": {"rich_text": [{"type": "text", "text": {"content": "🍱 오늘의 식단"}}]},
         }]
+        menu_id = menu.get("id")
+        menu_date = menu.get("date_menu") or (menu.get("modified") or "")[:10]
+        image_seq = 0
         for text_field, img_field, label in self.MEAL_FIELDS:
             text = (menu.get(text_field) or "").strip()
             img = menu.get(img_field)
@@ -2088,8 +2110,15 @@ class NotionMirror:
             if kidsnote_sess is None or not isinstance(img, dict):
                 continue
             try:
+                image_seq += 1
                 fid, filename = self._upload_media_object(
-                    kidsnote_sess, img, kind="image", timeout=120,
+                    kidsnote_sess,
+                    img,
+                    kind="image",
+                    timeout=120,
+                    item_id=menu_id,
+                    item_date=menu_date,
+                    sequence=image_seq,
                 )
                 out.append(self._image_block(fid))
                 if media_refs is not None:
@@ -2221,7 +2250,13 @@ class NotionMirror:
         for img in report.get("attached_images") or []:
             try:
                 fid, filename = self._upload_media_object(
-                    kidsnote_sess, img, kind="image", timeout=120,
+                    kidsnote_sess,
+                    img,
+                    kind="image",
+                    timeout=120,
+                    item_id=report_id,
+                    item_date=date_str,
+                    sequence=len(image_upload_ids) + 1,
                 )
                 image_upload_ids.append((fid, filename))
             except MediaBackupError:
@@ -2358,7 +2393,13 @@ class NotionMirror:
         for img in item.get("attached_images") or []:
             try:
                 fid, filename = self._upload_media_object(
-                    kidsnote_sess, img, kind="image", timeout=120,
+                    kidsnote_sess,
+                    img,
+                    kind="image",
+                    timeout=120,
+                    item_id=item_id,
+                    item_date=date_str,
+                    sequence=len(image_upload_ids) + 1,
                 )
                 image_upload_ids.append((fid, filename))
             except MediaBackupError:
@@ -2604,7 +2645,13 @@ class NotionMirror:
             if isinstance(meal_img, dict):
                 try:
                     fid, filename = self._upload_media_object(
-                        kidsnote_sess, meal_img, kind="image", timeout=120,
+                        kidsnote_sess,
+                        meal_img,
+                        kind="image",
+                        timeout=120,
+                        item_id=menu_id,
+                        item_date=date_str,
+                        sequence=images_uploaded + 1,
                     )
                     blocks.append(self._image_block(fid))
                     media_refs.append((fid, filename))
