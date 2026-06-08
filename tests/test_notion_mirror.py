@@ -618,6 +618,44 @@ class NotionMirrorTests(unittest.TestCase):
     def test_missing_original_url_is_a_media_backup_failure(self) -> None:
         with self.assertRaises(MediaBackupError):
             NotionMirror._original_url({"id": 9, "high_resize": "https://resized"}, kind="image")
+        with self.assertRaises(MediaBackupError):
+            NotionMirror._original_url({"id": 10, "high": "https://cdn/file.pdf"}, kind="file")
+
+    def test_video_missing_original_uses_high_url_with_visible_note(self) -> None:
+        raw = b"VIDEO-HIGH-BYTES"
+        high_url = "https://cdn.kidsnote.test/video/high.mp4"
+        report = {
+            "id": 1179016325,
+            "date_written": "2025-02-20",
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "동영상을 보냈습니다.",
+            "attached_video": {
+                "id": 30560982,
+                "high": high_url,
+                "original_file_name": "activity.mp4",
+            },
+        }
+
+        with patch.object(NotionMirror, "_title_oneliner", return_value="동영상을 보냄"):
+            mirror = make_mirror()
+            kidsnote = FakeKidsnoteSession(media={high_url: raw})
+            mirror.publish_report(report, kidsnote)
+
+        self.assertIn(high_url, kidsnote.requested_urls)
+        self.assertEqual(mirror.session.upload_creates[0]["filename"], "activity.mp4")
+        self.assertEqual(mirror.session.upload_creates[0]["content_type"], "video/mp4")
+        self.assertEqual(mirror.session.uploads[0]["raw"], raw)
+        page = mirror.session.pages[0]
+        media_files = page["properties"]["Files & media"]["files"]
+        self.assertEqual(media_files[0]["name"], "activity.mp4")
+        paragraphs = [
+            b["paragraph"]["rich_text"][0]["text"]["content"]
+            for b in page["children"]
+            if b.get("type") == "paragraph"
+        ]
+        self.assertTrue(any("high URL로 백업" in text for text in paragraphs))
+        self.assertTrue(any(b.get("type") == "video" for b in page["children"]))
 
     def test_title_cleaner_accepts_wrapped_gemma_output(self) -> None:
         raw = "제목\n```text\n아빠가 이담이를 어린이집으로 데리러 간다고 알림\n```"

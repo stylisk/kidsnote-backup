@@ -646,17 +646,41 @@ class NotionMirror:
         return EXTERNAL_REF_PREFIX + url
 
     @staticmethod
-    def _original_url(obj: Any, *, kind: str) -> str:
+    def _media_url(obj: Any, *, kind: str) -> tuple[str, str]:
         if isinstance(obj, str):
-            return obj
+            return obj, "original"
         if not isinstance(obj, dict):
             raise MediaBackupError(f"{kind} attachment has unsupported metadata shape")
         url = obj.get("original")
-        if not url:
-            raise MediaBackupError(
-                f"{kind} attachment id={obj.get('id', '?')} has no original URL"
+        if url:
+            return str(url), "original"
+        if kind == "video":
+            high_url = obj.get("high")
+            if high_url:
+                _LOGGER.warning(
+                    "video attachment id=%s has no original URL; using Kidsnote high URL",
+                    obj.get("id", "?"),
+                )
+                return str(high_url), "high"
+        raise MediaBackupError(
+            f"{kind} attachment id={obj.get('id', '?')} has no original URL"
+        )
+
+    @staticmethod
+    def _original_url(obj: Any, *, kind: str) -> str:
+        url, _source = NotionMirror._media_url(obj, kind=kind)
+        return url
+
+    @staticmethod
+    def _video_source_note(filename: str, source: str) -> str | None:
+        if source == "original":
+            return None
+        if source == "high":
+            return (
+                "Kidsnote 원본 동영상 URL이 없어 high URL로 백업했습니다"
+                f": {filename}"
             )
-        return str(url)
+        return f"Kidsnote 동영상 URL source={source}로 백업했습니다: {filename}"
 
     @staticmethod
     def _original_filename(
@@ -933,8 +957,8 @@ class NotionMirror:
         item_id: Any | None = None,
         item_date: Any | None = None,
         sequence: int | None = None,
-    ) -> tuple[str, str]:
-        url = self._original_url(obj, kind=kind)
+    ) -> tuple[str, str, str]:
+        url, source = self._media_url(obj, kind=kind)
         filename = self._original_filename(
             obj,
             url,
@@ -947,8 +971,8 @@ class NotionMirror:
             kidsnote_sess, url, kind=kind, filename=filename, timeout=timeout,
         )
         if kind == "image":
-            return self._upload_one_image(raw, filename), filename
-        return self._upload_one_blob(raw, filename, kind=kind), filename
+            return self._upload_one_image(raw, filename), filename, source
+        return self._upload_one_blob(raw, filename, kind=kind), filename, source
 
     # ----------------------------------------------------------- page build
 
@@ -1082,6 +1106,7 @@ class NotionMirror:
         image_upload_ids: list[tuple[str, str]],
         video_upload_ids: list[tuple[str, str]],
         file_upload_ids: list[tuple[str, str]],  # list of (id, filename)
+        video_source_notes: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
 
@@ -1124,6 +1149,8 @@ class NotionMirror:
                 "type": "heading_3",
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "동영상"}}]},
             })
+            for note in video_source_notes or []:
+                blocks.append(self._para(note, color="gray"))
             for fid, _fname in video_upload_ids:
                 blocks.append(self._video_block(fid))
 
@@ -2111,7 +2138,7 @@ class NotionMirror:
                 continue
             try:
                 image_seq += 1
-                fid, filename = self._upload_media_object(
+                fid, filename, _source = self._upload_media_object(
                     kidsnote_sess,
                     img,
                     kind="image",
@@ -2249,7 +2276,7 @@ class NotionMirror:
         images_failed = 0
         for img in report.get("attached_images") or []:
             try:
-                fid, filename = self._upload_media_object(
+                fid, filename, _source = self._upload_media_object(
                     kidsnote_sess,
                     img,
                     kind="image",
@@ -2264,6 +2291,7 @@ class NotionMirror:
 
         # Videos: kidsnote stores it as a single object (or None / list of 1).
         video_upload_ids: list[tuple[str, str]] = []
+        video_source_notes: list[str] = []
         videos_failed = 0
         video_objs: list[dict[str, Any]] = []
         for k in ("attached_video", "video", "attached_videos"):
@@ -2276,10 +2304,13 @@ class NotionMirror:
                 break
         for vobj in video_objs:
             try:
-                fid, filename = self._upload_media_object(
+                fid, filename, source = self._upload_media_object(
                     kidsnote_sess, vobj, kind="video", timeout=180,
                 )
                 video_upload_ids.append((fid, filename))
+                note = self._video_source_note(filename, source)
+                if note:
+                    video_source_notes.append(note)
             except MediaBackupError:
                 raise
 
@@ -2288,7 +2319,7 @@ class NotionMirror:
         files_failed = 0
         for fobj in report.get("attached_files") or []:
             try:
-                fid, filename = self._upload_media_object(
+                fid, filename, _source = self._upload_media_object(
                     kidsnote_sess, fobj, kind="file", timeout=180,
                 )
                 file_upload_ids.append((fid, filename))
@@ -2297,6 +2328,7 @@ class NotionMirror:
 
         children = self._build_children(
             report, image_upload_ids, video_upload_ids, file_upload_ids,
+            video_source_notes=video_source_notes,
         )
 
         # Insert life-record detail blocks (food/sleep/nursing timelines) +
@@ -2392,7 +2424,7 @@ class NotionMirror:
         images_failed = 0
         for img in item.get("attached_images") or []:
             try:
-                fid, filename = self._upload_media_object(
+                fid, filename, _source = self._upload_media_object(
                     kidsnote_sess,
                     img,
                     kind="image",
@@ -2407,6 +2439,7 @@ class NotionMirror:
 
         # ---- Upload videos ----
         video_upload_ids: list[tuple[str, str]] = []
+        video_source_notes: list[str] = []
         videos_failed = 0
         video_objs: list[dict[str, Any]] = []
         for k in ("attached_video", "video", "attached_videos"):
@@ -2419,10 +2452,13 @@ class NotionMirror:
                 break
         for vobj in video_objs:
             try:
-                fid, filename = self._upload_media_object(
+                fid, filename, source = self._upload_media_object(
                     kidsnote_sess, vobj, kind="video", timeout=180,
                 )
                 video_upload_ids.append((fid, filename))
+                note = self._video_source_note(filename, source)
+                if note:
+                    video_source_notes.append(note)
             except MediaBackupError:
                 raise
 
@@ -2431,7 +2467,7 @@ class NotionMirror:
         files_failed = 0
         for fobj in item.get("attached_files") or []:
             try:
-                fid, filename = self._upload_media_object(
+                fid, filename, _source = self._upload_media_object(
                     kidsnote_sess, fobj, kind="file", timeout=180,
                 )
                 file_upload_ids.append((fid, filename))
@@ -2461,6 +2497,8 @@ class NotionMirror:
                 "type": "heading_3",
                 "heading_3": {"rich_text": [{"type": "text", "text": {"content": "동영상"}}]},
             })
+            for note in video_source_notes:
+                blocks.append(self._para(note, color="gray"))
             for fid, _fname in video_upload_ids:
                 blocks.append(self._video_block(fid))
         if file_upload_ids:
@@ -2644,7 +2682,7 @@ class NotionMirror:
             # Photo (if present)
             if isinstance(meal_img, dict):
                 try:
-                    fid, filename = self._upload_media_object(
+                    fid, filename, _source = self._upload_media_object(
                         kidsnote_sess,
                         meal_img,
                         kind="image",
