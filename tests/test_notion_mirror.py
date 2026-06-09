@@ -507,6 +507,30 @@ class NotionMirrorTests(unittest.TestCase):
         with self.assertRaises(MediaBackupError):
             mirror_without_drive._upload_one_image(raw, "IMG_0001.JPG")
 
+    def test_media_download_retries_transient_connection_drop(self) -> None:
+        class FlakyKidsnoteSession:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get(self, url: str, **kwargs) -> FakeResponse:
+                self.calls += 1
+                if self.calls == 1:
+                    raise requests.ConnectionError("remote disconnected")
+                return FakeResponse(content=b"ORIGINAL-BYTES")
+
+        session = FlakyKidsnoteSession()
+        with patch.object(nm.time, "sleep", return_value=None):
+            raw = NotionMirror._download_original_media(
+                session,  # type: ignore[arg-type]
+                "https://cdn.kidsnote.test/img.jpg",
+                kind="image",
+                filename="img.jpg",
+                timeout=120,
+            )
+
+        self.assertEqual(raw, b"ORIGINAL-BYTES")
+        self.assertEqual(session.calls, 2)
+
     def test_drive_fallback_prefers_oauth_env(self) -> None:
         with patch.dict(os.environ, {
             "GOOGLE_DRIVE_FOLDER_ID": "folder-id",

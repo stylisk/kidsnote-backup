@@ -25,6 +25,7 @@ import io
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -717,14 +718,23 @@ class NotionMirror:
         filename: str,
         timeout: int,
     ) -> bytes:
-        try:
-            resp = kidsnote_sess.get(url, timeout=timeout)
-            resp.raise_for_status()
-            return resp.content
-        except Exception as e:
-            raise MediaBackupError(
-                f"{kind} {filename} download failed ({_safe_url(url)}): {e}"
-            ) from e
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                resp = kidsnote_sess.get(url, timeout=timeout)
+                resp.raise_for_status()
+                return resp.content
+            except Exception as e:
+                last_error = e
+                if attempt < 3:
+                    _LOGGER.warning(
+                        "%s %s download attempt %d/3 failed; retrying: %s",
+                        kind, filename, attempt, e,
+                    )
+                    time.sleep(attempt)
+        raise MediaBackupError(
+            f"{kind} {filename} download failed ({_safe_url(url)}): {last_error}"
+        ) from last_error
 
     # ----------------------------------------------------------- dedup
 
