@@ -74,8 +74,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  OLLAMA_MODEL: gemma4:e4b
-  OLLAMA_CACHE_KEY: ollama-gemma4-e4b-v2
+  OLLAMA_MODEL: gemma4:12b-it-qat
+  OLLAMA_CACHE_KEY: ollama-gemma4-12b-it-qat-v1
 
 jobs:
   mirror:
@@ -113,8 +113,8 @@ jobs:
           echo "requirements:"
           nl -ba tools/kidsnote_fetch/requirements.txt
 
-          if [ "${OLLAMA_MODEL}" != "gemma4:e4b" ]; then
-            echo "::error::OLLAMA_MODEL must be gemma4:e4b, got '${OLLAMA_MODEL}'"
+          if [ "${OLLAMA_MODEL}" != "gemma4:12b-it-qat" ]; then
+            echo "::error::OLLAMA_MODEL must be gemma4:12b-it-qat, got '${OLLAMA_MODEL}'"
             exit 1
           fi
           if grep -Eiq '^[[:space:]]*(pillow|piexif)([[:space:]<>=!~]|$)' tools/kidsnote_fetch/requirements.txt; then
