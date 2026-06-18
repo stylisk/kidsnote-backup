@@ -72,7 +72,7 @@ def _get_ollama() -> dict[str, str] | None:
     _OLLAMA_TRIED = True
     import os
     host = os.environ.get("OLLAMA_HOST")
-    model = os.environ.get("OLLAMA_MODEL") or "gemma4:e4b"
+    model = os.environ.get("OLLAMA_MODEL") or "gemma4:12b-it-qat"
     if not host:
         return None
     # Probe /api/version with a short timeout — fail fast.
@@ -282,6 +282,12 @@ FILES_NAME_CANDIDATES = (
     "사진 원본",
 )
 MAX_NOTION_FILE_NAME = 100
+TITLE_MODEL_NAME_CANDIDATES = (
+    "Title Model",
+    "제목 모델",
+    "LLM Title Model",
+    "LLM 제목 모델",
+)
 
 
 class MediaBackupError(RuntimeError):
@@ -544,6 +550,7 @@ class NotionMirror:
         self._prop_report_id: str | None = None
         self._prop_date: str | None = None
         self._prop_files: str | None = None
+        self._prop_title_model: str | None = None
 
     def _resolve_schema(self) -> None:
         """Discover required DB property names and create Files & media if needed."""
@@ -617,6 +624,48 @@ class NotionMirror:
                 f"DB is missing a Files & media property and automatic creation failed: {e}"
             ) from e
         _LOGGER.info("Created Notion files property %r for original media filenames", prop_name)
+        return prop_name
+
+    def _ensure_title_model_property(self) -> str:
+        """Create/find a text property used to resume long title refresh runs."""
+        if self._prop_title_model:
+            return self._prop_title_model
+        r = self.session.get(
+            f"{NOTION_API}/databases/{self.database_id}",
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Notion-Version": NOTION_VERSION,
+            },
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        props: dict[str, Any] = r.json().get("properties") or {}
+        for name in TITLE_MODEL_NAME_CANDIDATES:
+            meta = props.get(name)
+            if meta and meta.get("type") == "rich_text":
+                self._prop_title_model = name
+                return name
+        prop_name = next((name for name in TITLE_MODEL_NAME_CANDIDATES if name not in props), None)
+        if prop_name is None:
+            base = "Title Model"
+            idx = 2
+            while f"{base} {idx}" in props:
+                idx += 1
+            prop_name = f"{base} {idx}"
+        try:
+            r = self.session.patch(
+                f"{NOTION_API}/databases/{self.database_id}",
+                headers=self._headers(),
+                json={"properties": {prop_name: {"rich_text": {}}}},
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            raise RuntimeError(
+                f"DB is missing a Title Model property and automatic creation failed: {e}"
+            ) from e
+        self._prop_title_model = prop_name
+        _LOGGER.info("Created Notion title model property %r for resumable title refresh", prop_name)
         return prop_name
 
     # ----------------------------------------------------------- internals
@@ -738,11 +787,33 @@ class NotionMirror:
 
     # ----------------------------------------------------------- dedup
 
+    @staticmethod
+    def _plain_prop_text(prop: dict[str, Any]) -> str:
+        ptype = prop.get("type")
+        values = prop.get(ptype) if ptype in {"title", "rich_text"} else None
+        if not isinstance(values, list):
+            return ""
+        return "".join(
+            str(v.get("plain_text") or "")
+            for v in values
+            if isinstance(v, dict)
+        ).strip()
+
     def existing_report_ids(self) -> set[int]:
         """Walk the whole database once, return every existing `Report ID`."""
         return set(self.existing_report_page_map().keys())
 
     def existing_report_page_map(self) -> dict[int, str]:
+        return {
+            rid: str(record["page_id"])
+            for rid, record in self.existing_report_page_records().items()
+        }
+
+    def existing_report_page_records(
+        self,
+        *,
+        include_title_model: bool = False,
+    ) -> dict[int, dict[str, Any]]:
         """Map every existing `Report ID` to its Notion page id.
 
         Used by --force-refresh to archive prior versions of each
@@ -750,7 +821,9 @@ class NotionMirror:
         """
         self._resolve_schema()
         assert self._prop_report_id is not None
-        out: dict[int, str] = {}
+        assert self._prop_title is not None
+        title_model_prop = self._ensure_title_model_property() if include_title_model else None
+        out: dict[int, dict[str, Any]] = {}
         cursor: str | None = None
         while True:
             body: dict[str, Any] = {"page_size": 100}
@@ -778,7 +851,13 @@ class NotionMirror:
                 # reports never archives the dashboards.
                 if rid_int < 0:
                     continue
-                out[rid_int] = page["id"]
+                record = {
+                    "page_id": page["id"],
+                    "title": self._plain_prop_text(props.get(self._prop_title) or {}),
+                }
+                if title_model_prop:
+                    record["title_model"] = self._plain_prop_text(props.get(title_model_prop) or {})
+                out[rid_int] = record
             if not data.get("has_more"):
                 break
             cursor = data.get("next_cursor")
@@ -1497,7 +1576,7 @@ class NotionMirror:
         prompt: str,
         *,
         log_label: str | None = None,
-        timeout: int = 240,
+        timeout: int = 600,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         cfg = _get_ollama()
         if cfg is None:
@@ -1799,6 +1878,74 @@ class NotionMirror:
             metrics,
         )
         return None
+
+    @classmethod
+    def _report_page_title(cls, report: dict[str, Any], oneliner: str) -> str:
+        date_str = (
+            report.get("date_written")
+            or (report.get("modified") or "")[:10]
+            or (report.get("created") or "")[:10]
+            or datetime.now().date().isoformat()
+        )
+        author_title = cls._author_title_icon(report)
+        return f"[{date_str}] 알림장: {author_title} {oneliner}"
+
+    def refresh_report_title(
+        self,
+        report: dict[str, Any],
+        kidsnote_sess: requests.Session,
+        page_id: str,
+        *,
+        model_marker: str,
+    ) -> dict[str, Any]:
+        """Regenerate and update only the Notion page title for a report.
+
+        Blocks and file properties are intentionally left untouched so model
+        migrations do not re-upload media or recreate pages.
+        """
+        report_id = int(report["id"])
+        comments = (
+            self._fetch_comments(kidsnote_sess, "reports", report_id, strict=True)
+            if report.get("num_comments")
+            else []
+        )
+        details = self._title_details(report, comments)
+        title_oneliner = details.get("title")
+        flags = list(details.get("flags") or [])
+        if not title_oneliner or flags:
+            return {
+                "id": report_id,
+                "updated": False,
+                "failed": True,
+                "flags": flags or ["missing_title"],
+                "metrics": details.get("metrics") or {},
+            }
+
+        title = self._report_page_title(report, str(title_oneliner))
+        self._resolve_schema()
+        title_model_prop = self._ensure_title_model_property()
+        assert self._prop_title is not None
+        payload = {
+            "properties": {
+                self._prop_title: {"title": [{"text": {"content": title}}]},
+                title_model_prop: {"rich_text": [{"text": {"content": model_marker}}]},
+            }
+        }
+        r = self.session.patch(
+            f"{NOTION_API}/pages/{page_id}",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        return {
+            "id": report_id,
+            "updated": True,
+            "failed": False,
+            "title": title,
+            "flags": [],
+            "metrics": details.get("metrics") or {},
+        }
 
     @classmethod
     def _fallback_title_oneliner(
@@ -2278,8 +2425,7 @@ class NotionMirror:
                 "report id=%s: Gemma4 title unavailable after retries; using source-text fallback title",
                 report_id,
             )
-        author_title = self._author_title_icon(report)
-        title = f"[{date_str}] 알림장: {author_title} {oneliner}"
+        title = self._report_page_title(report, oneliner)
 
         # Upload photos first so we can drop image blocks into the page body.
         image_upload_ids: list[tuple[str, str]] = []

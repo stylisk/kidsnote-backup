@@ -12,7 +12,7 @@
 이 저장소는 **로컬에서는 개발·커밋만 하고, 실제 백업 실행은 GitHub Actions 클라우드에서 수행**하는 구조입니다.
 
 - 실행 워크플로: **`Kidsnote → Notion mirror`**
-- 기본 LLM 모델: **`gemma4:e4b`** (`OLLAMA_MODEL`로 고정, preflight guard로 검증)
+- 기본 LLM 모델: **`gemma4:12b-it-qat`** (`OLLAMA_MODEL`로 고정, preflight guard로 검증)
 - 기본 저장소: **Notion DB**
 - 대용량 fallback: **Google Drive 원본 보존** — Notion 5MB 한도 초과 또는 Notion 업로드 실패 시 같은 bytes/파일명으로 Drive에 올리고 Notion 페이지에 링크를 남김
 - 필수 GitHub Secrets: `KIDSNOTE_SESSION_COOKIE`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
@@ -211,7 +211,7 @@
 | 🌱 **{년}년 분기별 관심사** | 분기별 자녀가 가장 좋아한 활동·사물·사람 TOP 5 |
 | 💌 **{년}년 선생님께** | 1년치 알림장 기반의 감사 편지 초안 (졸업·연말에 가족이 다듬어 사용) |
 
-> 💡 모든 LLM 호출은 **GitHub Actions 러너 안의 무료 Ollama**(`gemma4:e4b`)로 처리되어 외부 API 비용·노출이 없습니다.
+> 💡 모든 LLM 호출은 **GitHub Actions 러너 안의 무료 Ollama**(`gemma4:12b-it-qat`)로 처리되어 외부 API 비용·노출이 없습니다.
 
 ---
 
@@ -245,8 +245,8 @@
 | 영역 | 현재 상태 |
 |---|---|
 | 실행 위치 | 로컬 개발 후 GitHub Actions 클라우드에서 `Kidsnote → Notion mirror` 실행 |
-| LLM 모델 | `gemma4:e4b`로 고정. workflow preflight에서 모델명과 cache key를 로그로 출력하고 다른 모델이면 실패 |
-| Ollama cache | `OLLAMA_CACHE_KEY=ollama-gemma4-e4b-v2` |
+| LLM 모델 | `gemma4:12b-it-qat`로 고정. workflow preflight에서 모델명과 cache key를 로그로 출력하고 다른 모델이면 실패 |
+| Ollama cache | `OLLAMA_CACHE_KEY=ollama-gemma4-12b-it-qat-v1` |
 | Python 의존성 | `requests`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트 |
 | Notion 업로드 | Notion `file_uploads` API 사용. 원본 bytes/파일명/EXIF를 변경하지 않고, DB `Files & media` 속성에도 원본 파일명으로 첨부 |
 | Google Drive fallback | 대용량 또는 Notion 업로드 실패 파일을 같은 bytes/파일명으로 Drive에 올리고 Notion에는 외부 링크로 삽입 |
@@ -867,7 +867,9 @@ Gemma 응답은 `title` 하나만 받습니다. 프롬프트는 30자 이내를 
 1. **알림장·공지·앨범·식단 publish** — 새 페이지 생성 (시간 大, 사진 업로드 포함)
 2. **7개 대시보드 자동 생성** — 통계/추억/영양 + 4개 LLM 페이지 (성장 스토리/마일스톤/관심사/감사 카드). 새 알림장이 publish되면 LLM 대시보드도 자동 갱신
 
-> 💡 **`force_refresh` 옵션** (고급): 제목 생성 prompt나 페이지 구조가 바뀐 뒤 기존 알림장도 새 형식으로 다시 만들고 싶으면, `Run workflow`에서 `force_refresh`를 `true`로 설정. **첫 백업과 동일한 시간 소요** (모든 페이지를 archive 후 재발행). 마찬가지로 4시간 cron 자동 재개로 끝까지 진행됨.
+> 💡 **`refresh_report_titles_only` 옵션** (고급): 제목 생성 prompt나 모델만 바뀐 뒤 기존 알림장 제목도 새 형식으로 바꾸고 싶으면, `Run workflow`에서 `refresh_report_titles_only`를 `true`로 설정. 기존 페이지 본문과 미디어는 유지하고 제목만 바꿉니다.
+>
+> 💡 **`force_refresh` 옵션** (고급): 페이지 본문 구조나 파일 속성 구조가 바뀐 경우에만 사용하세요. **첫 백업과 동일한 시간 소요** (모든 페이지를 archive 후 재발행).
 >
 > 일반 사용자는 `force_refresh=false` (기본값)로 충분합니다.
 
@@ -1050,14 +1052,17 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 
 ### 코드 업데이트 후 권장 작업
 
-업데이트가 **LLM 제목 prompt 개선**이나 페이지 구조 변경 같은 경우, 기존 알림장 페이지는 옛 형식으로 남아 있습니다. 새 형식으로 다시 만들고 싶으면:
+업데이트가 **LLM 제목 prompt/모델 개선**인 경우, 기존 알림장 페이지를 다시 만들지 말고 제목만 갱신하는 전용 모드를 먼저 쓰세요:
 
 1. Sync fork 완료 후
 2. **`Actions`** → **`Kidsnote → Notion mirror`** → **`Run workflow`**
-3. **`force_refresh`** 를 **`true`** 로 변경 → 녹색 버튼 클릭
-4. 첫 백업과 같은 시간(18~30시간) 소요. cron 자동 재개로 끝까지 진행됨
+3. **`refresh_report_titles_only`** 를 **`true`** 로 변경 → 녹색 버튼 클릭
+4. 기존 노션 페이지의 제목만 바꿉니다. 본문/사진/파일은 재생성하거나 재업로드하지 않습니다.
+5. 실행 시간이 길어도 `Title Model` 속성으로 이미 갱신한 페이지를 건너뛰므로 같은 옵션으로 다시 실행하면 이어서 진행됩니다.
 
-> ⚠️ **force_refresh를 켤지 결정하는 기준**: 이미 노션에 잘 채워져 있고 큰 불만 없으면 그냥 둬도 됩니다. 제목/본문 구조를 새 정책으로 통일하고 싶을 때만 force_refresh.
+페이지 본문 구조 자체가 바뀐 경우에만 `force_refresh=true`를 사용하세요. 이 모드는 기존 페이지를 archive 후 재발행하므로 첫 백업과 비슷한 시간이 걸리고 미디어도 다시 처리합니다.
+
+> ⚠️ **force_refresh를 켤지 결정하는 기준**: 제목만 바꾸려면 `refresh_report_titles_only=true`, 본문 블록/파일 속성 구조까지 새 정책으로 통일해야 할 때만 `force_refresh=true`.
 
 ---
 
@@ -1192,7 +1197,7 @@ UI는 노션이 가끔 바뀝니다. 메뉴 이름이 달라도 다음 기능을
 | 노션 페이지에 사진이 안 보임 | 노션 무료 한도(스토리지) 초과, 5MB 이상 사진, 또는 Drive fallback 미설정 | 노션 스토리지와 Drive fallback Secret 확인. 사진은 압축하지 않고 원본 보존 |
 | `Google Drive fallback upload failed ... File not found` | `GOOGLE_DRIVE_FOLDER_ID`가 틀렸거나 OAuth 승인 계정이 폴더에 접근 불가 | Drive 폴더 ID 확인 + OAuth 승인한 계정에서 폴더 접근 확인 |
 | `storageQuotaExceeded` / `Service Accounts do not have storage quota` | 예전 서비스 계정 방식 secret을 쓰고 있음 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`으로 교체 |
-| `OLLAMA_MODEL must be gemma4:e4b` | workflow 모델 값이 바뀜 | `.github/workflows/kidsnote-to-notion.yml`의 `OLLAMA_MODEL`을 `gemma4:e4b`로 복구 |
+| `OLLAMA_MODEL must be gemma4:12b-it-qat` | workflow 모델 값이 바뀜 | `.github/workflows/kidsnote-to-notion.yml`의 `OLLAMA_MODEL`을 `gemma4:12b-it-qat`로 복구 |
 | 모바일/태블릿에서 단계 진행 안 됨 | 모바일은 미지원 | 데스크톱/노트북 사용 |
 
 ### 정말 막혔다면
@@ -1214,7 +1219,7 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/stylisk
 - Notion API `2022-06-28` (`file_uploads` + `databases` + 100-children chunked PATCH)
 - Google Drive API (선택): `drive.file` scope로 Notion 5MB 제한 또는 업로드 실패 시 외부 링크 fallback
 - 키즈노트 비공식 API `/api/v1_2/children/<id>/reports/`
-- **Ollama** on the runner (`gemma4:e4b`, CPU-only) — 7개 대시보드 중 LLM 4개 생성에 사용. 모델·바이너리는 `actions/cache@v4`로 영구 캐싱
+- **Ollama** on the runner (`gemma4:12b-it-qat`, CPU-only) — 알림장 제목과 7개 대시보드 중 LLM 4개 생성에 사용. 모델·바이너리는 `actions/cache@v4`로 영구 캐싱
 
 **핵심 코드** ([`tools/kidsnote_fetch/`](tools/kidsnote_fetch/), 약 4000줄):
 - `fetch.py` — 키즈노트 API 호출 + 메인 로직 + dashboard 라우팅
@@ -1222,13 +1227,14 @@ GitHub Issues 페이지에 질문을 올려주세요: https://github.com/stylisk
 - `requirements.txt` — Python 의존성
 
 **LLM 파이프라인**:
-- gemma4:e4b → 알림장 제목 한줄요약, 4개 대시보드 (성장 스토리/마일스톤/관심사/감사 카드)
+- gemma4:12b-it-qat → 알림장 제목 한줄요약, 4개 대시보드 (성장 스토리/마일스톤/관심사/감사 카드)
 - kiwipiepy → 통계/카테고리 보조 분류
 - 후처리: `_strip_lead_meta` (메타 lead-in 자동 제거), `_strip_cjk` (한자 누수 차단, >20%면 reject), `_extract_after_final_label` (분석+본문 분리), few-shot 예시 누수 가드, 명사구/문장형 자동 분류
 
 **옵션 플래그**:
 - `monthly_sample=true` — 디버그용 월별 1개 알림장만 처리 (단위 테스트)
-- `force_refresh=true` — 기존 노션 페이지를 archive 후 재발행 (prompt 개선 후 기존 데이터 갱신용)
+- `refresh_report_titles_only=true` — 기존 노션 페이지는 유지하고 제목만 12B QAT로 다시 생성
+- `force_refresh=true` — 기존 노션 페이지를 archive 후 재발행 (본문/파일 속성 구조 변경 후 기존 데이터 재생성용)
 
 워크플로 정의: [`.github/workflows/kidsnote-to-notion.yml`](.github/workflows/kidsnote-to-notion.yml)
 

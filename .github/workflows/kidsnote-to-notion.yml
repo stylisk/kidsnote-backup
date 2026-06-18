@@ -46,10 +46,20 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      refresh_report_titles_only:
+        description: "Regenerate existing Notion report titles in place; no media upload"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
       title_source_chars:
         description: "Title QA source characters per body/comment; 0 hides source text"
         required: false
         default: "500"
+      title_refresh_sleep_sec:
+        description: "Seconds to wait after each Notion title update"
+        required: false
+        default: "5"
       llm_mode:
         description: "auto skips Gemma for limit/monthly_sample tests; choose gemma to force LLM"
         required: false
@@ -74,8 +84,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  OLLAMA_MODEL: gemma4:e4b
-  OLLAMA_CACHE_KEY: ollama-gemma4-e4b-v2
+  OLLAMA_MODEL: gemma4:12b-it-qat
+  OLLAMA_CACHE_KEY: ollama-gemma4-12b-it-qat-v1
 
 jobs:
   mirror:
@@ -108,13 +118,22 @@ jobs:
           echo "ollama model: ${OLLAMA_MODEL}"
           echo "ollama cache key: ${OLLAMA_CACHE_KEY}"
           echo "title quality only: ${{ inputs.title_quality_only || 'false' }}"
+          echo "refresh report titles only: ${{ inputs.refresh_report_titles_only || 'false' }}"
           echo "llm mode: ${{ inputs.llm_mode || 'auto' }}"
-          echo "use ollama: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}"
+          echo "use ollama: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}"
           echo "requirements:"
           nl -ba tools/kidsnote_fetch/requirements.txt
 
-          if [ "${OLLAMA_MODEL}" != "gemma4:e4b" ]; then
-            echo "::error::OLLAMA_MODEL must be gemma4:e4b, got '${OLLAMA_MODEL}'"
+          if [ "${OLLAMA_MODEL}" != "gemma4:12b-it-qat" ]; then
+            echo "::error::OLLAMA_MODEL must be gemma4:12b-it-qat, got '${OLLAMA_MODEL}'"
+            exit 1
+          fi
+          if [ "${{ inputs.refresh_report_titles_only || 'false' }}" = "true" ] && [ "${{ inputs.force_refresh || 'false' }}" = "true" ]; then
+            echo "::error::refresh_report_titles_only cannot be combined with force_refresh"
+            exit 1
+          fi
+          if [ "${{ inputs.refresh_report_titles_only || 'false' }}" = "true" ] && [ "${{ inputs.title_quality_only || 'false' }}" = "true" ]; then
+            echo "::error::refresh_report_titles_only cannot be combined with title_quality_only"
             exit 1
           fi
           if grep -Eiq '^[[:space:]]*(pillow|piexif)([[:space:]<>=!~]|$)' tools/kidsnote_fetch/requirements.txt; then
@@ -124,10 +143,10 @@ jobs:
 
       # ---- Ollama for speaker-aware report titles + LLM dashboards ----
       # Local LLM runs inside the runner — no API key / cost.
-      # gemma4:e4b is pinned by the preflight guard above so prompt behavior
+      # gemma4:12b-it-qat is pinned by the preflight guard above so prompt behavior
       # and cache identity drift loudly instead of silently changing output.
       - name: Cache Ollama models
-        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
         id: ollama-cache
         uses: actions/cache@v4
         with:
@@ -135,7 +154,7 @@ jobs:
           key: ${{ env.OLLAMA_CACHE_KEY }}
 
       - name: Install Ollama + pull model
-        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
         run: |
           if ! command -v ollama >/dev/null 2>&1; then
             curl -fsSL https://ollama.com/install.sh | sh
@@ -165,9 +184,21 @@ jobs:
           model = os.environ["OLLAMA_MODEL"]
           payload = {
               "model": model,
-              "messages": [{"role": "user", "content": "한국어로 OK만 출력해."}],
+              "messages": [{"role": "user", "content": "다음 JSON만 출력해: {\"title\":\"테스트\"}"}],
               "stream": False,
-              "options": {"temperature": 0, "num_predict": 8},
+              "think": False,
+              "keep_alive": "30m",
+              "format": {
+                  "type": "object",
+                  "properties": {"title": {"type": "string"}},
+                  "required": ["title"],
+              },
+              "options": {
+                  "temperature": 0.2,
+                  "top_p": 0.95,
+                  "top_k": 64,
+                  "num_predict": 96,
+              },
           }
           for attempt in range(1, 4):
               req = urllib.request.Request(
@@ -181,7 +212,7 @@ jobs:
                       body = json.loads(resp.read().decode("utf-8"))
                   content = ((body.get("message") or {}).get("content") or "").strip()
                   print(f"ollama warmup attempt {attempt}: {content or '(empty)'}")
-                  if content:
+                  if content and "title" in content:
                       sys.exit(0)
               except Exception as exc:
                   print(f"ollama warmup attempt {attempt} failed: {exc}")
@@ -190,7 +221,7 @@ jobs:
           PY
 
       - name: Skip Ollama for fast fallback test
-        if: ${{ github.event_name != 'schedule' && inputs.title_quality_only != 'true' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
+        if: ${{ github.event_name != 'schedule' && inputs.title_quality_only != 'true' && inputs.refresh_report_titles_only != 'true' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
         run: |
           echo "Skipping Ollama/Gemma setup for fast workflow test."
           echo "Report titles will use source-text fallback; LLM dashboards are skipped in this mode."
@@ -206,7 +237,7 @@ jobs:
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           # Tell notion_mirror.py where Ollama lives + which model to use
           OLLAMA_MODEL: ${{ env.OLLAMA_MODEL }}
-          USE_OLLAMA: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+          USE_OLLAMA: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
           PYTHONUNBUFFERED: "1"
         run: |
           set -eu
@@ -215,7 +246,10 @@ jobs:
           else
             unset OLLAMA_HOST
           fi
-          if [ "${{ inputs.title_quality_only }}" = "true" ]; then
+          if [ "${{ inputs.refresh_report_titles_only }}" = "true" ]; then
+            ARGS=( "--auth-mode" "session-cookie-env" "--refresh-report-titles-only" "--no-local-save" )
+            ARGS+=( "--title-refresh-sleep-sec" "${{ inputs.title_refresh_sleep_sec }}" )
+          elif [ "${{ inputs.title_quality_only }}" = "true" ]; then
             ARGS=( "--auth-mode" "session-cookie-env" "--title-quality-only" "--no-local-save" )
             ARGS+=( "--title-source-chars" "${{ inputs.title_source_chars }}" )
           else
@@ -227,7 +261,7 @@ jobs:
           if [ "${{ inputs.monthly_sample }}" = "true" ]; then
             ARGS+=( "--monthly-sample" )
           fi
-          if [ "${{ inputs.force_refresh }}" = "true" ] && [ "${{ inputs.title_quality_only }}" != "true" ]; then
+          if [ "${{ inputs.force_refresh }}" = "true" ] && [ "${{ inputs.title_quality_only }}" != "true" ] && [ "${{ inputs.refresh_report_titles_only }}" != "true" ]; then
             ARGS+=( "--force-refresh" )
           fi
           python tools/kidsnote_fetch/fetch.py "${ARGS[@]}"

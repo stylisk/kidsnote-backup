@@ -66,8 +66,10 @@ class FakeNotionSession:
     def __init__(self) -> None:
         self.pages: list[dict] = []
         self.patches: list[dict] = []
+        self.page_patches: list[dict] = []
         self.upload_creates: list[dict] = []
         self.uploads: list[dict] = []
+        self.query_results: list[dict] = []
         self._upload_idx = 0
         self.properties = {
             "Name": {"type": "title"},
@@ -87,12 +89,20 @@ class FakeNotionSession:
             for name, meta in (payload.get("properties") or {}).items():
                 if "files" in meta:
                     self.properties[name] = {"type": "files"}
+                elif "rich_text" in meta:
+                    self.properties[name] = {"type": "rich_text"}
                 else:
                     self.properties[name] = meta
             return FakeResponse({"properties": self.properties})
+        if "/pages/" in url:
+            payload = kwargs["json"]
+            self.page_patches.append(payload)
+            return FakeResponse({"id": url.rsplit("/", 1)[-1]})
         raise AssertionError(f"unexpected Notion PATCH {url}")
 
     def post(self, url: str, **kwargs) -> FakeResponse:
+        if url.endswith("/query"):
+            return FakeResponse({"results": self.query_results, "has_more": False})
         if url.endswith("/file_uploads"):
             self.upload_creates.append(kwargs["json"])
             self._upload_idx += 1
@@ -165,7 +175,7 @@ class NotionMirrorTests(unittest.TestCase):
         def fake_ollama_post(url: str, **kwargs) -> FakeResponse:
             self.assertEqual(url, "http://ollama.test/api/chat")
             body = kwargs["json"]
-            self.assertEqual(body["model"], "gemma4:e4b")
+            self.assertEqual(body["model"], "gemma4:12b-it-qat")
             self.assertFalse(body["stream"])
             self.assertFalse(body["think"])
             self.assertEqual(body["keep_alive"], "30m")
@@ -204,7 +214,7 @@ class NotionMirrorTests(unittest.TestCase):
         }]
 
         with (
-            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:e4b"}),
+            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:12b-it-qat"}),
             patch.object(nm.requests, "get", side_effect=fake_ollama_get),
             patch.object(nm.requests, "post", side_effect=fake_ollama_post),
         ):
@@ -722,13 +732,87 @@ class NotionMirrorTests(unittest.TestCase):
         }
 
         with (
-            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:e4b"}),
+            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:12b-it-qat"}),
             patch.object(nm.requests, "get", side_effect=fake_ollama_get),
             patch.object(nm.requests, "post", side_effect=fake_ollama_post),
         ):
             title = NotionMirror._title_oneliner(report, [])
 
         self.assertEqual(title, "선생님이 꽃 관찰 활동을 전함")
+
+    def test_existing_report_page_records_creates_and_reads_title_model(self) -> None:
+        session = FakeNotionSession()
+        session.properties["Files & media"] = {"type": "files"}
+        session.query_results = [{
+            "id": "page-existing",
+            "properties": {
+                "Name": {
+                    "type": "title",
+                    "title": [{"plain_text": "[2026-05-14] 알림장: 👩‍🏫 기존 제목"}],
+                },
+                "Report ID": {"type": "number", "number": 1393476830},
+                "Title Model": {
+                    "type": "rich_text",
+                    "rich_text": [{"plain_text": "gemma4:12b-it-qat"}],
+                },
+            },
+        }]
+        with patch.object(nm._DriveFallbackUploader, "from_env", return_value=None):
+            mirror = NotionMirror(
+                token="notion-token",
+                database_id="database-id",
+                session=session,
+            )
+
+        records = mirror.existing_report_page_records(include_title_model=True)
+
+        self.assertEqual(session.patches, [{"properties": {"Title Model": {"rich_text": {}}}}])
+        self.assertEqual(records[1393476830]["page_id"], "page-existing")
+        self.assertEqual(records[1393476830]["title_model"], "gemma4:12b-it-qat")
+
+    def test_refresh_report_title_patches_existing_page_without_republishing(self) -> None:
+        session = FakeNotionSession()
+        session.properties["Files & media"] = {"type": "files"}
+        session.properties["Title Model"] = {"type": "rich_text"}
+        with patch.object(nm._DriveFallbackUploader, "from_env", return_value=None):
+            mirror = NotionMirror(
+                token="notion-token",
+                database_id="database-id",
+                session=session,
+            )
+        report = {
+            "id": 1393476830,
+            "date_written": "2026-05-14",
+            "author": {"type": "teacher", "name": "물빛1반 교사"},
+            "author_name": "물빛1반 교사",
+            "content": "오늘은 감정 표현 놀이를 했습니다.",
+        }
+
+        with patch.object(NotionMirror, "_title_details", return_value={
+            "title": "감정 놀이와 블록 활동 안내",
+            "flags": [],
+            "metrics": {"done_reason": "stop"},
+        }):
+            result = mirror.refresh_report_title(
+                report,
+                FakeKidsnoteSession(),
+                "page-existing",
+                model_marker="gemma4:12b-it-qat",
+            )
+
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["title"], "[2026-05-14] 알림장: 👩‍🏫 감정 놀이와 블록 활동 안내")
+        self.assertEqual(session.pages, [])
+        self.assertEqual(len(session.page_patches), 1)
+        props = session.page_patches[0]["properties"]
+        self.assertEqual(
+            props["Name"]["title"][0]["text"]["content"],
+            "[2026-05-14] 알림장: 👩‍🏫 감정 놀이와 블록 활동 안내",
+        )
+        self.assertEqual(
+            props["Title Model"]["rich_text"][0]["text"]["content"],
+            "gemma4:12b-it-qat",
+        )
 
     def test_invalid_title_json_is_rejected_with_error_details(self) -> None:
         reset_ollama_state()
@@ -754,7 +838,7 @@ class NotionMirrorTests(unittest.TestCase):
         }
 
         with (
-            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:e4b"}),
+            patch.dict(os.environ, {"OLLAMA_HOST": "http://ollama.test", "OLLAMA_MODEL": "gemma4:12b-it-qat"}),
             patch.object(nm.requests, "get", side_effect=fake_ollama_get),
             patch.object(nm.requests, "post", side_effect=fake_ollama_post),
         ):

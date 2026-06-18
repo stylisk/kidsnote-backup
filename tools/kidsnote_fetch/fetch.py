@@ -80,11 +80,18 @@ _LOGGER = logging.getLogger("kidsnote_fetch")
 _START_TIME = time.monotonic()
 TIME_BUDGET_SEC = 5 * 3600 + 30 * 60  # 5h30m — 30 min safety margin
 DASHBOARD_RESERVE_SEC = 120  # keep 2 min for fast dashboards after publish loop
+TITLE_REFRESH_BUDGET_SEC = 11 * 3600 + 30 * 60  # title-only runs can use most of 12h
+TITLE_REFRESH_RESERVE_SEC = 10 * 60
 
 
 def _remaining_budget() -> float:
     """Seconds remaining in the workflow's self-imposed time budget."""
     return TIME_BUDGET_SEC - (time.monotonic() - _START_TIME)
+
+
+def _remaining_title_refresh_budget() -> float:
+    """Seconds remaining for a long title-only migration run."""
+    return TITLE_REFRESH_BUDGET_SEC - (time.monotonic() - _START_TIME)
 
 
 def _publish_batch_with_resume(
@@ -699,6 +706,121 @@ def _run_title_quality_check(
     return 0
 
 
+def _refresh_report_titles_only(
+    sess: requests.Session,
+    reports: list[dict[str, Any]],
+    mirror: Any,
+    *,
+    title_model: str,
+    sleep_sec: float,
+) -> int:
+    """Regenerate report page titles in place without touching page media/body."""
+    from notion_mirror import NotionMirror  # local module
+
+    page_records = mirror.existing_report_page_records(include_title_model=True)
+    pending: list[dict[str, Any]] = []
+    missing = 0
+    already = 0
+    for report in reports:
+        report_id = int(report.get("id", 0))
+        record = page_records.get(report_id)
+        if not record:
+            missing += 1
+            continue
+        if str(record.get("title_model") or "") == title_model:
+            already += 1
+            continue
+        pending.append(report)
+
+    _LOGGER.info(
+        "Title refresh: %d fetched, %d already marked %s, %d missing Notion pages, %d to update",
+        len(reports), already, title_model, missing, len(pending),
+    )
+    if missing:
+        _LOGGER.warning(
+            "Title refresh: %d report(s) have no existing Notion page and were skipped. "
+            "Run the normal mirror first if these should exist.",
+            missing,
+        )
+
+    updated = 0
+    failed = 0
+    consecutive_failures = 0
+    stopped_early = False
+    for idx, report in enumerate(pending, 1):
+        if _remaining_title_refresh_budget() < TITLE_REFRESH_RESERVE_SEC:
+            _LOGGER.warning(
+                "Title refresh: time budget reached after %d/%d update(s). "
+                "Re-run the same workflow to continue from Title Model markers.",
+                updated, len(pending),
+            )
+            stopped_early = True
+            break
+        report_id = int(report["id"])
+        pct = (idx / len(pending) * 100) if pending else 100.0
+        detail = _fetch_report_detail(sess, report_id)
+        if detail is None:
+            _LOGGER.error("Title refresh %5.1f%% (%d/%d) | detail fetch failed id=%s",
+                          pct, idx, len(pending), report_id)
+            failed += 1
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                _LOGGER.error("Title refresh: stopping after 5 consecutive failures")
+                break
+            continue
+        record = page_records.get(report_id) or {}
+        try:
+            result = mirror.refresh_report_title(
+                detail,
+                sess,
+                str(record["page_id"]),
+                model_marker=title_model,
+            )
+        except Exception as e:
+            _LOGGER.warning(
+                "Title refresh %5.1f%% (%d/%d) | FAILED id=%d: %s",
+                pct, idx, len(pending), report_id, e,
+            )
+            failed += 1
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                _LOGGER.error("Title refresh: stopping after 5 consecutive failures")
+                break
+            continue
+        if result.get("failed"):
+            metrics = dict(result.get("metrics") or {})
+            raw = metrics.pop("raw", None)
+            _LOGGER.warning(
+                "Title refresh %5.1f%% (%d/%d) | FAILED id=%d flags=%s metrics=%s raw=%s",
+                pct, idx, len(pending), report_id,
+                ",".join(str(flag) for flag in result.get("flags") or []) or "unknown",
+                metrics,
+                _plain_text(str(raw or ""), max_chars=200) if raw else "",
+            )
+            failed += 1
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                _LOGGER.error("Title refresh: stopping after 5 consecutive failures")
+                break
+            continue
+        updated += 1
+        consecutive_failures = 0
+        _LOGGER.info(
+            "Title refresh %5.1f%% (%d/%d) | updated id=%d title=%s",
+            pct, idx, len(pending), report_id, result.get("title"),
+        )
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
+
+    _LOGGER.info(
+        "Title refresh DONE: %d updated, %d already marked, %d missing pages, %d failed, stopped_early=%s",
+        updated, already, missing, failed, stopped_early,
+    )
+    if failed:
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Personal Kidsnote fetcher - not part of the public package."
@@ -717,9 +839,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--title-quality-only", action="store_true",
                     help="Fetch selected reports, run Gemma title generation, and print "
                          "source context + title samples without publishing to Notion.")
+    ap.add_argument("--refresh-report-titles-only", action="store_true",
+                    help="Regenerate existing Notion report titles in place. "
+                         "Does not recreate pages or upload media; records Title Model "
+                         "so long runs can resume safely.")
     ap.add_argument("--title-source-chars", type=int, default=500,
                     help="Max body/comment characters to show per Title QA sample. "
                          "Use 0 to hide source text in CI logs.")
+    ap.add_argument("--title-refresh-sleep-sec", type=float, default=2.0,
+                    help="Seconds to sleep after each Notion title update.")
     ap.add_argument("--auth-mode", default="session-cookie-env",
                     choices=["session-cookie-env", "browser-cookie"],
                     help="session-cookie-env (default): reads KIDSNOTE_SESSION_COOKIE "
@@ -766,8 +894,19 @@ def main(argv: list[str] | None = None) -> int:
     # Sanity: at least one output channel must be active.
     if not args.no_local_save and args.backup_root is None:
         sys.exit("--backup-root is required unless --no-local-save is set.")
-    if args.no_local_save and not (args.publish_to_notion or args.title_quality_only):
-        sys.exit("--no-local-save is only useful with --publish-to-notion or --title-quality-only.")
+    if args.no_local_save and not (
+        args.publish_to_notion or args.title_quality_only or args.refresh_report_titles_only
+    ):
+        sys.exit(
+            "--no-local-save is only useful with --publish-to-notion, "
+            "--title-quality-only, or --refresh-report-titles-only."
+        )
+    if args.refresh_report_titles_only and args.publish_to_notion:
+        sys.exit("--refresh-report-titles-only cannot be combined with --publish-to-notion.")
+    if args.refresh_report_titles_only and args.title_quality_only:
+        sys.exit("--refresh-report-titles-only cannot be combined with --title-quality-only.")
+    if args.refresh_report_titles_only and args.force_refresh:
+        sys.exit("--refresh-report-titles-only cannot be combined with --force-refresh.")
 
     env = _load_env_file(args.env_file) if args.env_file.exists() else {}
 
@@ -790,7 +929,7 @@ def main(argv: list[str] | None = None) -> int:
     mirror = None
     skip_ids: set[int] = set()
     page_map: dict[int, str] = {}
-    if args.publish_to_notion:
+    if args.publish_to_notion or args.refresh_report_titles_only:
         from notion_mirror import NotionMirror  # local module
         token = _resolve_secret(env, "NOTION_TOKEN")
         db_id = _resolve_secret(env, "NOTION_DATABASE_ID")
@@ -802,7 +941,12 @@ def main(argv: list[str] | None = None) -> int:
         mirror = NotionMirror(token=token, database_id=db_id)
         try:
             page_map = mirror.existing_report_page_map()
-            if args.force_refresh:
+            if args.refresh_report_titles_only:
+                _LOGGER.info(
+                    "Notion DB: title refresh active, %d existing report page(s) found",
+                    len(page_map),
+                )
+            elif args.force_refresh:
                 _LOGGER.info(
                     "Notion DB: --force-refresh active, %d existing pages will be "
                     "archived + re-published", len(page_map),
@@ -851,6 +995,17 @@ def main(argv: list[str] | None = None) -> int:
         _LOGGER.info("title-quality mode: no limit/monthly-sample set, kept newest 10 reports")
     _LOGGER.info("fetched %d reports for child id=%s",
                  len(reports), target.get("id"))
+
+    if args.refresh_report_titles_only:
+        if mirror is None:
+            sys.exit("--refresh-report-titles-only requires NOTION_TOKEN / NOTION_DATABASE_ID.")
+        return _refresh_report_titles_only(
+            sess,
+            reports,
+            mirror,
+            title_model=os.environ.get("OLLAMA_MODEL") or "gemma4:12b-it-qat",
+            sleep_sec=max(0.0, args.title_refresh_sleep_sec),
+        )
 
     if args.title_quality_only:
         return _run_title_quality_check(
