@@ -165,9 +165,16 @@ jobs:
           model = os.environ["OLLAMA_MODEL"]
           payload = {
               "model": model,
-              "messages": [{"role": "user", "content": "한국어로 OK만 출력해."}],
+              "messages": [{"role": "user", "content": "다음 JSON만 출력해: {\"title\":\"테스트\"}"}],
               "stream": False,
-              "options": {"temperature": 0, "num_predict": 8},
+              "think": False,
+              "keep_alive": "30m",
+              "format": {
+                  "type": "object",
+                  "properties": {"title": {"type": "string"}},
+                  "required": ["title"],
+              },
+              "options": {"temperature": 0.2, "top_p": 0.95, "top_k": 64, "num_predict": 96},
           }
           for attempt in range(1, 4):
               req = urllib.request.Request(
