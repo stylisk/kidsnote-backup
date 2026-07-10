@@ -104,12 +104,9 @@ def run_probe(env: Mapping[str, str] | None = None) -> int:
 
                 stage = "login_form_ready"
                 print(f"AUTH_PROBE stage={stage}")
+                stage = "credentials_fill"
                 username_input.fill(username)
                 password_input.fill(password)
-                remember_me = form.locator('input[name="remember_me"]')
-                if remember_me.count():
-                    # Kidsnote visually replaces this input and keeps it CSS-hidden.
-                    remember_me.check(force=True)
 
                 stage = "login_submit"
                 print(f"AUTH_PROBE stage={stage}")
