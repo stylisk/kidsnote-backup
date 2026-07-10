@@ -78,82 +78,94 @@ def run_probe(env: Mapping[str, str] | None = None) -> int:
             "Playwright is not installed; install requirements-browser-auth.txt"
         ) from exc
 
-    print("AUTH_PROBE stage=browser_start")
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=["--disable-dev-shm-usage"],
-        )
-        context = browser.new_context(locale="ko-KR", timezone_id="Asia/Seoul")
-        try:
-            page = context.new_page()
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
-
-            form = page.locator('form[action$="/login"]')
-            form.wait_for(state="visible", timeout=30_000)
-            username_input = form.locator('input[name="username"]')
-            password_input = form.locator('input[name="password"]')
-            submit = form.locator('button[type="submit"]')
-            if not username_input.count() or not password_input.count() or not submit.count():
-                raise AuthProbeError("Kidsnote login form fields were not found")
-
-            print("AUTH_PROBE stage=login_form_ready")
-            username_input.fill(username)
-            password_input.fill(password)
-            remember_me = form.locator('input[name="remember_me"]')
-            if remember_me.count():
-                remember_me.check()
-            submit.click()
-
-            session_cookie = None
-            deadline = time.monotonic() + 45
-            while time.monotonic() < deadline:
-                session_cookie = find_session_cookie(context.cookies())
-                if session_cookie:
-                    break
-                page.wait_for_timeout(500)
-
-            if not session_cookie:
-                if _visible(page, "text=2단계 인증") or _visible(page, "text=인증번호 입력"):
-                    raise AuthProbeError("Kidsnote requested two-factor authentication")
-                if _visible(page, 'input[name="password"]'):
-                    raise AuthProbeError(
-                        "login was not accepted or an interactive challenge was shown"
-                    )
-                raise AuthProbeError("no Kidsnote sessionid cookie was issued")
-
-            print(
-                "AUTH_PROBE stage=session_cookie_received "
-                f"domain={session_cookie.get('domain', '(unknown)')} "
-                f"secure={bool(session_cookie.get('secure'))} "
-                f"http_only={bool(session_cookie.get('httpOnly'))}"
+    stage = "browser_start"
+    print(f"AUTH_PROBE stage={stage}")
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage"],
             )
-
-            response = context.request.get(
-                CHILDREN_API_URL,
-                headers={
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Language": "ko",
-                    "Referer": "https://www.kidsnote.com/",
-                },
-                timeout=30_000,
-            )
-            if response.status != 200:
-                raise AuthProbeError(
-                    f"children API validation failed with HTTP {response.status}"
-                )
+            context = browser.new_context(locale="ko-KR", timezone_id="Asia/Seoul")
             try:
-                count = child_count(response.json())
-            except PlaywrightTimeoutError as exc:
-                raise AuthProbeError("children API response timed out") from exc
-            except ValueError as exc:
-                raise AuthProbeError("children API returned invalid JSON") from exc
+                stage = "login_page_load"
+                print(f"AUTH_PROBE stage={stage}")
+                page = context.new_page()
+                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
 
-            print(f"AUTH_PROBE result=PASS children_count={count}")
-            return 0
-        finally:
-            context.close()
-            browser.close()
+                stage = "login_form_wait"
+                form = page.locator('form[action$="/login"]')
+                form.wait_for(state="visible", timeout=30_000)
+                username_input = form.locator('input[name="username"]')
+                password_input = form.locator('input[name="password"]')
+                submit = form.locator('button[type="submit"]')
+                if not username_input.count() or not password_input.count() or not submit.count():
+                    raise AuthProbeError("Kidsnote login form fields were not found")
+
+                stage = "login_form_ready"
+                print(f"AUTH_PROBE stage={stage}")
+                username_input.fill(username)
+                password_input.fill(password)
+                remember_me = form.locator('input[name="remember_me"]')
+                if remember_me.count():
+                    # Kidsnote visually replaces this input and keeps it CSS-hidden.
+                    remember_me.check(force=True)
+
+                stage = "login_submit"
+                print(f"AUTH_PROBE stage={stage}")
+                submit.click()
+
+                stage = "session_cookie_wait"
+                session_cookie = None
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    session_cookie = find_session_cookie(context.cookies())
+                    if session_cookie:
+                        break
+                    page.wait_for_timeout(500)
+
+                if not session_cookie:
+                    if _visible(page, "text=2단계 인증") or _visible(page, "text=인증번호 입력"):
+                        raise AuthProbeError("Kidsnote requested two-factor authentication")
+                    if _visible(page, 'input[name="password"]'):
+                        raise AuthProbeError(
+                            "login was not accepted or an interactive challenge was shown"
+                        )
+                    raise AuthProbeError("no Kidsnote sessionid cookie was issued")
+
+                print(
+                    "AUTH_PROBE stage=session_cookie_received "
+                    f"domain={session_cookie.get('domain', '(unknown)')} "
+                    f"secure={bool(session_cookie.get('secure'))} "
+                    f"http_only={bool(session_cookie.get('httpOnly'))}"
+                )
+
+                stage = "children_api_validation"
+                response = context.request.get(
+                    CHILDREN_API_URL,
+                    headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "ko",
+                        "Referer": "https://www.kidsnote.com/",
+                    },
+                    timeout=30_000,
+                )
+                if response.status != 200:
+                    raise AuthProbeError(
+                        f"children API validation failed with HTTP {response.status}"
+                    )
+                try:
+                    count = child_count(response.json())
+                except ValueError as exc:
+                    raise AuthProbeError("children API returned invalid JSON") from exc
+
+                print(f"AUTH_PROBE result=PASS children_count={count}")
+                return 0
+            finally:
+                context.close()
+                browser.close()
+    except PlaywrightTimeoutError as exc:
+        raise AuthProbeError(f"browser timed out during {stage}") from exc
 
 
 def main() -> int:
