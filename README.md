@@ -15,7 +15,7 @@
 - 기본 LLM 모델: **`gemma4:12b-it-qat`** (`OLLAMA_MODEL`로 고정, preflight guard로 검증)
 - 기본 저장소: **Notion DB**
 - 대용량 fallback: **Google Drive 원본 보존** — Notion 5MB 한도 초과 또는 Notion 업로드 실패 시 같은 bytes/파일명으로 Drive에 올리고 Notion 페이지에 링크를 남김
-- 필수 GitHub Secrets: `KIDSNOTE_USERNAME`, `KIDSNOTE_PASSWORD`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
+- 필수 GitHub Secrets: `KIDSNOTE_USERNAME`, `KIDSNOTE_PASSWORD`, `KIDSNOTE_SESSION_STATE_KEY`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
 - 선택 GitHub Secrets: `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`
 
 변경 내역과 구현 근거는 [docs/2026-05-18-cloud-run-drive-fallback.md](docs/2026-05-18-cloud-run-drive-fallback.md)에 기록되어 있습니다.
@@ -236,7 +236,7 @@
    내 노션 DB                       ← 나만 접근 가능
 ```
 
-데이터는 **키즈노트 → GitHub 임시 메모리 → 내 노션** 으로만 흐릅니다. 외부 서버에 저장되거나 노출되지 않습니다.
+데이터는 **키즈노트 → GitHub 임시 메모리 → 내 노션** 으로 흐릅니다. 로그인 세션만 별도 Secret으로 AES-GCM 암호화되어 GitHub artifact에 보관되며, 원문과 미디어는 artifact에 저장하지 않습니다.
 
 ## 🧾 현재 변경 기록
 
@@ -248,6 +248,7 @@
 | LLM 모델 | `gemma4:12b-it-qat`로 고정. workflow preflight에서 모델명과 cache key를 로그로 출력하고 다른 모델이면 실패 |
 | Ollama cache | `OLLAMA_CACHE_KEY=ollama-gemma4-12b-it-qat-v1` |
 | Python 의존성 | `requests`, `playwright`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트 |
+| Kidsnote 인증 | 암호화 artifact의 세션을 먼저 API 검증하고, 만료 또는 최초 실행일 때만 Playwright 로그인 |
 | Notion 업로드 | Notion `file_uploads` API 사용. 원본 bytes/파일명/EXIF를 변경하지 않고, DB `Files & media` 속성에도 원본 파일명으로 첨부 |
 | Google Drive fallback | 대용량 또는 Notion 업로드 실패 파일을 같은 bytes/파일명으로 Drive에 올리고 Notion에는 외부 링크로 삽입 |
 | 권한 설계 | GitHub에는 Google 계정 비밀번호를 넣지 않음. OAuth refresh token으로 fallback 전용 Drive 폴더에 업로드 |
@@ -271,7 +272,7 @@
 |------|------|------|
 | **0~8단계 셋업** | **15~25분** ← 여기만 손이 감 | - |
 | **첫 풀 백업 (3년치)** | 0분 (그냥 켜만 두면 됨) | **54~90시간** (cron이 자동으로) |
-| **이후 운영** | 0분 | 4시간마다 브라우저 로그인 후 새 알림장 자동 체크 |
+| **이후 운영** | 0분 | 4시간마다 기존 세션으로 새 알림장 확인, 세션 만료 시에만 브라우저 로그인 |
 
 > 💡 **솔직히 말씀드리면**: README 한 번 정독하고 시작하면 셋업 25분, 그 다음은 GitHub Actions가 4시간 cron으로 며칠에 걸쳐 이어서 처리합니다. 사용자가 직접 옆에 붙어있을 일은 거의 없습니다.
 
@@ -545,14 +546,15 @@ https://www.notion.so/키즈노트백업-238f5e29c0894adfb6c4d8e1a5b2c3d4?v=...
 
 ## 6단계. 키즈노트 로그인 정보 준비하기
 
-GitHub Actions는 실행할 때마다 Playwright Chromium으로 키즈노트에 로그인하고 새 `sessionid`를 발급받습니다. 개발자 도구에서 쿠키를 복사하거나 만료 때마다 갱신할 필요가 없습니다.
+첫 실행은 Playwright Chromium으로 키즈노트에 로그인하고 `sessionid`를 발급받습니다. 이후에는 암호화된 세션을 Kidsnote API로 먼저 검증하고, 유효하면 브라우저 로그인 없이 그대로 사용합니다. 세션이 만료되었을 때만 자동으로 다시 로그인합니다.
 
-다음 두 값만 준비하세요.
+다음 세 값을 준비하세요.
 
 | 값 | 설명 |
 |---|---|
 | 키즈노트 아이디 | https://www.kidsnote.com 로그인 화면의 아이디 |
 | 키즈노트 비밀번호 | 같은 계정의 비밀번호 |
+| 세션 암호화 키 | 비밀번호 관리자에서 만든 48자 이상의 무작위 문자열 또는 터미널의 `openssl rand -base64 48` 결과 |
 
 이 값은 다음 단계에서 GitHub Secrets에 직접 입력합니다. README, 코드, 이슈, 실행 로그에는 적지 마세요.
 
@@ -564,9 +566,9 @@ GitHub Actions는 실행할 때마다 Playwright Chromium으로 키즈노트에 
 
 > 🕐 **약 3분**
 >
-> 📍 **시작 전 확인**: 노션 토큰, DB ID, 키즈노트 아이디·비밀번호가 준비되어 있고 GitHub fork 페이지를 찾을 수 있음
+> 📍 **시작 전 확인**: 노션 토큰, DB ID, 키즈노트 아이디·비밀번호·세션 암호화 키가 준비되어 있고 GitHub fork 페이지를 찾을 수 있음
 
-이제 준비한 네 값을 GitHub fork에 저장합니다. GitHub Secrets는 워크플로 실행 시에만 주입되며 값은 목록이나 로그에 표시되지 않습니다.
+이제 준비한 다섯 값을 GitHub fork에 저장합니다. GitHub Secrets는 워크플로 실행 시에만 주입되며 값은 목록이나 로그에 표시되지 않습니다.
 
 ### 7-1. 내 fork 페이지 → Settings로 이동
 
@@ -581,9 +583,9 @@ GitHub Actions는 실행할 때마다 Playwright Chromium으로 키즈노트에 
 3. 좌측 사이드바에서 **`Secrets and variables`** 클릭 (펼쳐짐) → **`Actions`** 하위 클릭
 4. 페이지 우측 상단 **녹색 `New repository secret` 버튼** 클릭
 
-### 7-3. 필수 시크릿 4개 등록
+### 7-3. 필수 시크릿 5개 등록
 
-다음 표대로 **4번 반복**해서 등록합니다 — 한 번에 하나씩.
+다음 표대로 **5번 반복**해서 등록합니다 — 한 번에 하나씩.
 
 | Name (정확히 일치, 대소문자 구분) | Secret 값 |
 |---|---|
@@ -591,6 +593,7 @@ GitHub Actions는 실행할 때마다 Playwright Chromium으로 키즈노트에 
 | `NOTION_DATABASE_ID` | 5단계에서 추출한 32자 hex |
 | `KIDSNOTE_USERNAME` | 6단계에서 확인한 키즈노트 아이디 |
 | `KIDSNOTE_PASSWORD` | 6단계에서 확인한 키즈노트 비밀번호 |
+| `KIDSNOTE_SESSION_STATE_KEY` | 6단계에서 만든 세션 암호화 키 |
 
 **한 시크릿씩 등록하는 방법**:
 1. `New repository secret` 버튼 클릭
@@ -603,9 +606,10 @@ GitHub Actions는 실행할 때마다 Playwright Chromium으로 키즈노트에 
 
 > ⚠️ 값 복사 시 **앞뒤 공백/줄바꿈 포함 안 되게** 주의. 메모장 → GitHub 붙여넣기 시 클릭만 하고 `Ctrl+V`.
 
-✅ **7단계 성공 신호**: Secrets 목록에 다음 4개가 정확한 이름으로 나열됨:
+✅ **7단계 성공 신호**: Secrets 목록에 다음 5개가 정확한 이름으로 나열됨:
 ```
 KIDSNOTE_PASSWORD             Updated now
+KIDSNOTE_SESSION_STATE_KEY    Updated now
 KIDSNOTE_USERNAME             Updated now
 NOTION_DATABASE_ID            Updated now
 NOTION_TOKEN                  Updated now
@@ -697,7 +701,7 @@ python3 tools/kidsnote_fetch/drive_oauth_setup.py ~/Downloads/client_secret_....
 
 > 🕐 **백업 자체는 5분 ~ 4시간** (알림장 개수에 따라)
 >
-> 📍 **시작 전 확인**: 필수 시크릿 4개 등록 완료 + 노션 DB에 통합 연결 완료
+> 📍 **시작 전 확인**: 필수 시크릿 5개 등록 완료 + 노션 DB에 통합 연결 완료
 
 드디어 마지막 단계. 워크플로를 직접 한 번 돌려서 백업을 시작합니다.
 
@@ -865,7 +869,7 @@ GitHub Actions는 종종 네트워크 이슈로 중간에 멈출 수 있어요. 
 
 ✅ **이제 끝**: 셋업 끝났습니다. 이 시점부터는 **사용자가 할 일이 없어요**.
 - 매 4시간 cron 자동 트리거 → 새 알림장 있으면 자동 백업
-- 매 실행마다 GitHub Chromium이 새 로그인 세션을 자동 발급
+- 유효한 세션은 암호화 artifact에서 재사용, 만료 시에만 GitHub Chromium이 새 세션 발급
 
 ### ❓ 막혔다면
 
@@ -951,7 +955,7 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 - 새 알림장이 없으면 1~2분 만에 immediately exit
 - 새 알림장 있으면 처리 + LLM 대시보드 갱신
 
-**즉, 두 번째 이후 사용자가 할 일은 없습니다.** 기존 세션 만료와 무관하게 매 실행마다 새 로그인 세션을 발급받습니다.
+**즉, 두 번째 이후 사용자가 할 일은 없습니다.** 기존 세션이 유효하면 브라우저를 시작하지 않고, 만료되면 자동으로 새 로그인 세션을 발급받습니다.
 
 ### 매일 검증 안 해도 되나요?
 
@@ -975,7 +979,7 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 
 ### 키즈노트 로그인이 실패할 때
 
-`Kidsnote browser auth probe failed`가 나오면 `KIDSNOTE_USERNAME`과 `KIDSNOTE_PASSWORD`가 현재 웹 로그인 정보와 일치하는지 확인하세요. 비밀번호를 변경했다면 GitHub Secret도 함께 갱신해야 합니다. 추가 인증 화면이 나타나는 경우에는 자동 로그인 지원을 다시 점검해야 합니다.
+`Kidsnote browser auth probe failed`가 나오면 `KIDSNOTE_USERNAME`과 `KIDSNOTE_PASSWORD`가 현재 웹 로그인 정보와 일치하는지 확인하세요. `AUTH_SESSION source=cache result=PASS`가 보이면 기존 세션 재사용에 성공한 것입니다. 세션이 만료되면 `result=EXPIRED` 후 Playwright 로그인이 실행됩니다. 비밀번호를 변경했다면 GitHub Secret도 함께 갱신해야 합니다.
 
 ---
 
@@ -1084,17 +1088,17 @@ GitHub 자동 로그인은 키즈노트 아이디·비밀번호 입력 폼을 �
 - 새 알림장이 있으면 백업 + LLM 대시보드 갱신
 - 없으면 1~2분 만에 immediately exit (할 일 없으면 빠르게 종료)
 
-키즈노트 비밀번호를 변경하지 않는 한 세션 쿠키를 수동으로 갱신할 일은 없습니다.
+키즈노트 비밀번호를 변경하지 않는 한 세션 쿠키를 수동으로 갱신할 일은 없습니다. 정상 실행에서는 `Install Playwright Chromium`과 `Authenticate Kidsnote in browser` 단계가 `skipped`로 표시됩니다.
 
 > 💡 cron 자동 트리거를 끄고 수동으로만 돌리고 싶으면: Actions 탭 → 워크플로 → `⋯` → `Disable workflow`.
 
 ### 노션에 새 알림장이 안 들어와요 (며칠째 멈춤)
 
-먼저 GitHub의 브라우저 로그인 단계를 확인하세요:
+먼저 GitHub의 세션 검증 단계를 확인하세요:
 
 1. **GitHub 메일 확인** — 가입 이메일에 `Run failed` 알림이 와 있는지
 2. **Actions 탭 확인** — fork repo → `Actions` 탭 → 최근 run이 **빨간색 ❌**인지
-3. `Authenticate Kidsnote in browser` 단계의 오류 확인
+3. `Validate cached Kidsnote session`과 필요 시 `Authenticate Kidsnote in browser` 단계의 오류 확인
 4. `missing GitHub secret`이면 7단계의 Secret 이름 확인
 5. `login was not accepted`이면 키즈노트 아이디·비밀번호 확인
 
@@ -1129,7 +1133,8 @@ UI는 노션이 가끔 바뀝니다. 메뉴 이름이 달라도 다음 기능을
 
 | 에러 메시지 | 원인 | 해결 |
 |---|---|---|
-| `KIDSNOTE_USERNAME`, `KIDSNOTE_PASSWORD` 또는 `NOTION_TOKEN` missing | 시크릿 이름 오타 또는 누락 | 7단계 시크릿 이름 정확히 확인 |
+| `KIDSNOTE_USERNAME`, `KIDSNOTE_PASSWORD`, `KIDSNOTE_SESSION_STATE_KEY` 또는 `NOTION_TOKEN` missing | 시크릿 이름 오타 또는 누락 | 7단계 시크릿 이름 정확히 확인 |
+| `AUTH_SESSION source=cache result=EXPIRED` | 저장된 세션 만료 | 정상 동작. 뒤이어 브라우저 로그인이 한 번 실행됨 |
 | `Kidsnote browser auth probe failed` | 로그인 정보 불일치, 추가 인증 또는 로그인 화면 변경 | 키즈노트 웹 로그인 확인 후 관련 Secret 갱신 |
 | `401 Unauthorized` 키즈노트 에러 | 새 브라우저 세션 전달 또는 Kidsnote 로그인 상태 검증 실패 | `Authenticate Kidsnote in browser`와 `AUTH_HANDOFF` 로그 확인 |
 | `Notion DB query failed: 'latin-1' codec...` | 토큰 값에 보이지 않는 BOM 문자 끼임 | 토큰 시크릿 다시 등록. 메모장 → GitHub `Update`에서 깔끔하게 붙여넣기 |

@@ -1,8 +1,8 @@
 # Kidsnote → Notion mirror
 #
-# Kidsnote's login flow is browser-driven. Each run uses Playwright Chromium to
-# sign in, validates the resulting `sessionid` against the children API, and
-# passes it only through GitHub's temporary per-job environment file.
+# A verified `sessionid` is stored as an AES-GCM encrypted artifact. Each run
+# validates that session against the children API and only starts Playwright
+# when Kidsnote explicitly rejects it as expired.
 #
 # Dedup: each new Notion page records the kidsnote `Report ID`. Subsequent
 # runs query the DB once at startup and skip reports whose id is already
@@ -11,6 +11,7 @@
 # Required GitHub repository secrets (Settings → Secrets and variables → Actions):
 #   KIDSNOTE_USERNAME         Kidsnote login ID
 #   KIDSNOTE_PASSWORD         Kidsnote login password
+#   KIDSNOTE_SESSION_STATE_KEY random secret used only to encrypt session state
 #   NOTION_TOKEN              internal integration token from notion.so/profile/integrations
 #   NOTION_DATABASE_ID        32-char hex id from your Notion DB URL
 # Optional Google Drive fallback secrets:
@@ -83,10 +84,11 @@ on:
     - cron: "15 */4 * * *"
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: kidsnote-to-notion
+  group: ${{ inputs.auth_probe_only == 'true' && format('kidsnote-auth-probe-{0}', github.ref) || 'kidsnote-to-notion' }}
   cancel-in-progress: false
 
 env:
@@ -156,11 +158,12 @@ jobs:
         env:
           KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
           KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
+          KIDSNOTE_SESSION_STATE_KEY: ${{ secrets.KIDSNOTE_SESSION_STATE_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
           set -eu
-          REQUIRED=( KIDSNOTE_USERNAME KIDSNOTE_PASSWORD )
+          REQUIRED=( KIDSNOTE_USERNAME KIDSNOTE_PASSWORD KIDSNOTE_SESSION_STATE_KEY )
           if [ "${{ inputs.auth_probe_only || 'false' }}" != "true" ] && [ "${{ inputs.title_quality_only || 'false' }}" != "true" ]; then
             REQUIRED+=( NOTION_TOKEN NOTION_DATABASE_ID )
           fi
@@ -173,16 +176,77 @@ jobs:
           done
           exit "${MISSING}"
 
+      - name: Restore encrypted Kidsnote session
+        id: kidsnote-session-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          STATE_DIR="${RUNNER_TEMP}/kidsnote-session"
+          STATE_FILE="${STATE_DIR}/session.enc.json"
+          mkdir -p "${STATE_DIR}"
+          echo "state_file=${STATE_FILE}" >> "${GITHUB_OUTPUT}"
+
+          ARTIFACT_ID="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=kidsnote-session-state&per_page=100" \
+              --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty'
+          )"
+          if [ -z "${ARTIFACT_ID}" ]; then
+            echo "SESSION_ARTIFACT result=MISS"
+            exit 0
+          fi
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            > "${STATE_DIR}/artifact.zip"
+          unzip -q -o "${STATE_DIR}/artifact.zip" -d "${STATE_DIR}"
+          if [ -f "${STATE_FILE}" ]; then
+            echo "SESSION_ARTIFACT result=RESTORED artifact_id=${ARTIFACT_ID}"
+          else
+            echo "::warning::Encrypted Kidsnote session artifact had no state file; browser login will repair it"
+          fi
+
+      - name: Validate cached Kidsnote session
+        id: kidsnote-session
+        env:
+          KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
+          KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
+          KIDSNOTE_SESSION_STATE_KEY: ${{ secrets.KIDSNOTE_SESSION_STATE_KEY }}
+        run: |
+          python tools/kidsnote_fetch/browser_auth_probe.py \
+            --reuse-only \
+            --encrypted-session-in "${{ steps.kidsnote-session-artifact.outputs.state_file }}" \
+            --github-env "${GITHUB_ENV}" \
+            --github-output "${GITHUB_OUTPUT}"
+
       - name: Install Playwright Chromium
+        if: ${{ steps.kidsnote-session.outputs.reused != 'true' }}
         run: |
           pip install -r tools/kidsnote_fetch/requirements-browser-auth.txt
           python -m playwright install --with-deps chromium
 
       - name: Authenticate Kidsnote in browser
+        if: ${{ steps.kidsnote-session.outputs.reused != 'true' }}
         env:
           KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
           KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
-        run: python tools/kidsnote_fetch/browser_auth_probe.py --github-env "${GITHUB_ENV}"
+          KIDSNOTE_SESSION_STATE_KEY: ${{ secrets.KIDSNOTE_SESSION_STATE_KEY }}
+        run: |
+          python tools/kidsnote_fetch/browser_auth_probe.py \
+            --encrypted-session-out "${{ steps.kidsnote-session-artifact.outputs.state_file }}" \
+            --github-env "${GITHUB_ENV}"
+
+      - name: Save encrypted Kidsnote session
+        if: ${{ steps.kidsnote-session.outputs.reused != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kidsnote-session-state
+          path: ${{ steps.kidsnote-session-artifact.outputs.state_file }}
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Verify Kidsnote session handoff
         if: ${{ inputs.auth_probe_only == 'true' }}

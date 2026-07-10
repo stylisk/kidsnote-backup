@@ -4,3 +4,4 @@ kiwipiepy>=0.17
 google-api-python-client>=2.120
 google-auth>=2.28
 google-auth-oauthlib>=1.2
+cryptography>=42
