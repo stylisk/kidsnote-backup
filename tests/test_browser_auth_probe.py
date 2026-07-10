@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -44,6 +45,27 @@ class BrowserAuthProbeTests(unittest.TestCase):
     def test_child_count_rejects_unexpected_payload(self) -> None:
         with self.assertRaisesRegex(probe.AuthProbeError, "results list"):
             probe.child_count({"count": 1})
+
+    def test_write_github_env_exports_cookie_without_changing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "github_env"
+
+            probe.write_github_env(env_path, "abc123")
+
+            self.assertEqual(
+                env_path.read_text(encoding="utf-8"),
+                "KIDSNOTE_SESSION_COOKIE=abc123\n",
+            )
+
+    def test_write_github_env_rejects_newline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(probe.AuthProbeError, "newline"):
+                probe.write_github_env(Path(tmp) / "github_env", "abc\n123")
+
+    def test_write_github_env_rejects_empty_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(probe.AuthProbeError, "empty"):
+                probe.write_github_env(Path(tmp) / "github_env", "")
 
 
 if __name__ == "__main__":

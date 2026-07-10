@@ -1,16 +1,16 @@
 # Kidsnote → Notion mirror
 #
-# Kidsnote's login flow can no longer be driven by a headless HTTP client
-# (the page is a Next.js SPA). The workflow relies on a `sessionid` cookie
-# the operator extracts manually from a logged-in browser session and stores
-# in the KIDSNOTE_SESSION_COOKIE secret. That cookie typically lasts ~30 days.
+# Kidsnote's login flow is browser-driven. Each run uses Playwright Chromium to
+# sign in, validates the resulting `sessionid` against the children API, and
+# passes it only through GitHub's temporary per-job environment file.
 #
 # Dedup: each new Notion page records the kidsnote `Report ID`. Subsequent
 # runs query the DB once at startup and skip reports whose id is already
 # stored, so re-running is safe and idempotent.
 #
 # Required GitHub repository secrets (Settings → Secrets and variables → Actions):
-#   KIDSNOTE_SESSION_COOKIE   value of the `sessionid` cookie for kidsnote.com
+#   KIDSNOTE_USERNAME         Kidsnote login ID
+#   KIDSNOTE_PASSWORD         Kidsnote login password
 #   NOTION_TOKEN              internal integration token from notion.so/profile/integrations
 #   NOTION_DATABASE_ID        32-char hex id from your Notion DB URL
 # Optional Google Drive fallback secrets:
@@ -152,18 +152,56 @@ jobs:
             exit 1
           fi
 
-      - name: Install Playwright Chromium for auth probe
-        if: ${{ inputs.auth_probe_only == 'true' }}
+      - name: Verify required secrets
+        env:
+          KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
+          KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: |
+          set -eu
+          REQUIRED=( KIDSNOTE_USERNAME KIDSNOTE_PASSWORD )
+          if [ "${{ inputs.auth_probe_only || 'false' }}" != "true" ] && [ "${{ inputs.title_quality_only || 'false' }}" != "true" ]; then
+            REQUIRED+=( NOTION_TOKEN NOTION_DATABASE_ID )
+          fi
+          MISSING=0
+          for secret_name in "${REQUIRED[@]}"; do
+            if [ -z "${!secret_name:-}" ]; then
+              echo "::error::repo secret '${secret_name}' is empty or unset"
+              MISSING=1
+            fi
+          done
+          exit "${MISSING}"
+
+      - name: Install Playwright Chromium
         run: |
           pip install -r tools/kidsnote_fetch/requirements-browser-auth.txt
           python -m playwright install --with-deps chromium
 
-      - name: Probe Kidsnote browser login
-        if: ${{ inputs.auth_probe_only == 'true' }}
+      - name: Authenticate Kidsnote in browser
         env:
           KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
           KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
-        run: python tools/kidsnote_fetch/browser_auth_probe.py
+        run: python tools/kidsnote_fetch/browser_auth_probe.py --github-env "${GITHUB_ENV}"
+
+      - name: Verify Kidsnote session handoff
+        if: ${{ inputs.auth_probe_only == 'true' }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          sys.path.insert(0, "tools/kidsnote_fetch")
+          import fetch
+
+          cookie = os.environ.get("KIDSNOTE_SESSION_COOKIE") or ""
+          if not cookie:
+              raise SystemExit("KIDSNOTE_SESSION_COOKIE was not handed to the next step")
+          session = fetch._baseline_session()
+          session.cookies.set("sessionid", cookie, domain="www.kidsnote.com", path="/")
+          children = fetch._list_children(session)
+          print(f"AUTH_HANDOFF result=PASS children_count={len(children)}")
+          PY
 
       # ---- Ollama for speaker-aware report titles + LLM dashboards ----
       # Local LLM runs inside the runner — no API key / cost.
@@ -253,7 +291,6 @@ jobs:
       - name: Mirror Kidsnote → Notion
         if: ${{ inputs.auth_probe_only != 'true' }}
         env:
-          KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
@@ -290,20 +327,3 @@ jobs:
             ARGS+=( "--force-refresh" )
           fi
           python tools/kidsnote_fetch/fetch.py "${ARGS[@]}"
-
-      - name: Verify required secrets were present
-        if: ${{ failure() && inputs.auth_probe_only != 'true' }}
-        env:
-          KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: |
-          REQUIRED=( KIDSNOTE_SESSION_COOKIE )
-          if [ "${{ inputs.title_quality_only }}" != "true" ]; then
-            REQUIRED+=( NOTION_TOKEN NOTION_DATABASE_ID )
-          fi
-          for s in "${REQUIRED[@]}"; do
-            if [ -z "${!s:-}" ]; then
-              echo "::error::repo secret '$s' is empty or unset"
-            fi
-          done

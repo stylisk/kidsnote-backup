@@ -7,7 +7,7 @@
 [![Runs on GitHub Actions](https://img.shields.io/badge/runs%20on-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](#8단계-백업-실행)
 [![Notion](https://img.shields.io/badge/output-Notion-black?logo=notion)](#)
 
-## 현재 버전 요약 (2026-05-19)
+## 현재 버전 요약 (2026-07-10)
 
 이 저장소는 **로컬에서는 개발·커밋만 하고, 실제 백업 실행은 GitHub Actions 클라우드에서 수행**하는 구조입니다.
 
@@ -15,7 +15,7 @@
 - 기본 LLM 모델: **`gemma4:12b-it-qat`** (`OLLAMA_MODEL`로 고정, preflight guard로 검증)
 - 기본 저장소: **Notion DB**
 - 대용량 fallback: **Google Drive 원본 보존** — Notion 5MB 한도 초과 또는 Notion 업로드 실패 시 같은 bytes/파일명으로 Drive에 올리고 Notion 페이지에 링크를 남김
-- 필수 GitHub Secrets: `KIDSNOTE_SESSION_COOKIE`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
+- 필수 GitHub Secrets: `KIDSNOTE_USERNAME`, `KIDSNOTE_PASSWORD`, `NOTION_TOKEN`, `NOTION_DATABASE_ID`
 - 선택 GitHub Secrets: `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`
 
 변경 내역과 구현 근거는 [docs/2026-05-18-cloud-run-drive-fallback.md](docs/2026-05-18-cloud-run-drive-fallback.md)에 기록되어 있습니다.
@@ -84,7 +84,7 @@
   - [3단계. 노션 토큰 받기](#3단계-노션-통합integration-만들기--토큰-받기)
   - [4단계. DB에 통합 연결](#4단계-노션-db에-통합-연결하기)
   - [5단계. DB ID 복사](#5단계-노션-db-id-복사하기)
-  - [6단계. 쿠키 추출](#6단계-키즈노트-sessionid-쿠키-가져오기-chrome-기준)
+  - [6단계. 키즈노트 로그인 정보 준비](#6단계-키즈노트-로그인-정보-준비하기)
   - [7단계. GitHub Secrets](#7단계-github에-비밀-값-등록하기)
   - [8단계. 실행 + 자동 모드 ON](#8단계-백업-실행)
 - [현재 변경 기록](#-현재-변경-기록)
@@ -121,7 +121,7 @@
 |------|------------|-----|
 | **데스크톱 또는 노트북** | 셋업이 모두 브라우저 기반. 모바일 노션 URL이 다름 | - |
 | **인터넷 연결** | GitHub·노션 페이지 클릭 | - |
-| **Chrome 또는 Edge** | 6단계 쿠키 추출 시 개발자 도구 사용 | 무료 |
+| **Chrome 또는 Edge** | GitHub·Notion 설정 화면 사용 | 무료 |
 | **이메일 주소** | GitHub·노션 가입 + 실패 알림 받기 | - |
 | **Google Cloud / Drive** | 선택: 5MB 초과 동영상·PDF를 Drive 링크로 보존할 때만 필요 | 무료 사용량 내 |
 
@@ -145,11 +145,11 @@
 | **Google Drive API** (선택) | 개인 Drive 저장공간 사용 | 5MB 초과 fallback 첨부만 |
 | **Ollama LLM** | GitHub 러너 안에서 무료 실행 | 외부 API 비용 0원 |
 
-> 💡 **권장: Public fork** — GitHub Actions 무제한이라 첫 달 18-30시간 백업도 무관. 개인정보(쿠키·토큰)는 모두 GitHub Secrets에 암호화되어 코드 공개와 상관없이 안전합니다.
+> 💡 **권장: Public fork** — GitHub Actions 무제한이라 첫 달 18-30시간 백업도 무관. 로그인 정보와 토큰은 코드에 넣지 않고 GitHub Secrets에 저장합니다.
 
 ### 4. 시간 — 셋업 25분 / 백업은 자동
 
-- **사용자가 직접 손대는 시간**: 셋업 25분 + 한 달에 쿠키 갱신 3분
+- **사용자가 직접 손대는 시간**: 최초 셋업 약 25분
 - **백그라운드에서 자동으로 도는 시간**: 첫 백업 18~30시간 + 이후 매일 약 10분 (cron)
 
 준비 끝났으면 아래로 ⬇️ 시작!
@@ -247,7 +247,7 @@
 | 실행 위치 | 로컬 개발 후 GitHub Actions 클라우드에서 `Kidsnote → Notion mirror` 실행 |
 | LLM 모델 | `gemma4:12b-it-qat`로 고정. workflow preflight에서 모델명과 cache key를 로그로 출력하고 다른 모델이면 실패 |
 | Ollama cache | `OLLAMA_CACHE_KEY=ollama-gemma4-12b-it-qat-v1` |
-| Python 의존성 | `requests`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트 |
+| Python 의존성 | `requests`, `playwright`, `browser-cookie3`, `kiwipiepy`, Google Drive API 클라이언트 |
 | Notion 업로드 | Notion `file_uploads` API 사용. 원본 bytes/파일명/EXIF를 변경하지 않고, DB `Files & media` 속성에도 원본 파일명으로 첨부 |
 | Google Drive fallback | 대용량 또는 Notion 업로드 실패 파일을 같은 bytes/파일명으로 Drive에 올리고 Notion에는 외부 링크로 삽입 |
 | 권한 설계 | GitHub에는 Google 계정 비밀번호를 넣지 않음. OAuth refresh token으로 fallback 전용 Drive 폴더에 업로드 |
@@ -271,7 +271,7 @@
 |------|------|------|
 | **0~8단계 셋업** | **15~25분** ← 여기만 손이 감 | - |
 | **첫 풀 백업 (3년치)** | 0분 (그냥 켜만 두면 됨) | **54~90시간** (cron이 자동으로) |
-| **이후 운영** | 0분 / 한 달에 쿠키 갱신 3분 | 4시간마다 새 알림장 자동 체크 |
+| **이후 운영** | 0분 | 4시간마다 브라우저 로그인 후 새 알림장 자동 체크 |
 
 > 💡 **솔직히 말씀드리면**: README 한 번 정독하고 시작하면 셋업 25분, 그 다음은 GitHub Actions가 4시간 cron으로 며칠에 걸쳐 이어서 처리합니다. 사용자가 직접 옆에 붙어있을 일은 거의 없습니다.
 
@@ -543,74 +543,20 @@ https://www.notion.so/키즈노트백업-238f5e29c0894adfb6c4d8e1a5b2c3d4?v=...
 
 ---
 
-## 6단계. 키즈노트 sessionid 쿠키 가져오기 (Chrome 기준)
+## 6단계. 키즈노트 로그인 정보 준비하기
 
-> 🕐 **약 3분**
->
-> 📍 **시작 전 확인**: Chrome 또는 엣지 브라우저 + 키즈노트 로그인 완료 (0단계)
+GitHub Actions는 실행할 때마다 Playwright Chromium으로 키즈노트에 로그인하고 새 `sessionid`를 발급받습니다. 개발자 도구에서 쿠키를 복사하거나 만료 때마다 갱신할 필요가 없습니다.
 
-여기가 가장 어려워 보이지만 차근차근 따라하면 30초 안에 끝납니다.
+다음 두 값만 준비하세요.
 
-> Chrome 외에도 엣지(같은 화면) / 파이어폭스(`F12` → `저장소`)에서 가능합니다. 아래는 Chrome 기준.
-
-### 6-1. 키즈노트 로그인 + 개발자 도구 열기
-
-1. **Chrome**으로 https://www.kidsnote.com 접속 → 평소처럼 로그인
-   - **카카오 SSO로 로그인하시는 분**: "카카오로 로그인" → 카카오 페이지 → 로그인 → 자동으로 키즈노트로 돌아옵니다
-   - 로그인 후 자녀 알림장 화면(또는 메인)이 보여야 합니다
-2. 키즈노트가 로그인된 상태에서 키보드 **`F12`** 키 → 우측 또는 하단에 개발자 도구 창 열림
-   - ⚠️ **F12가 안 먹는 노트북**: `Fn + F12` 또는 `Ctrl + Shift + I`
-   - ⚠️ **그것도 안 먹으면**: Chrome 우측 상단 `⋮` (점 세 개) → `도구 더보기` → `개발자 도구`
-
-### 6-2. Application 탭에서 쿠키 찾기
-
-3. 개발자 도구 **상단 메뉴**에서 **`Application`** 클릭
-   - 한국어 Chrome도 메뉴는 영문 그대로 (`Elements`, `Console`, `Sources`, `Network` ... 옆에 있음)
-   - 안 보이면 메뉴 끝 **`>>`** 클릭 → 목록에서 `Application` 선택
-4. 왼쪽 사이드바에서 **`Storage`** 섹션 아래 **`Cookies`** 폴더 펼치기 → **`https://www.kidsnote.com`** 클릭
-5. 오른쪽에 큰 표가 나타남. 컬럼 헤더: `Name | Value | Domain | Path | Expires | Size | ...`
-
-### 6-3. sessionid 행 찾아서 값 복사
-
-6. 표에서 **다음 두 조건을 모두 만족하는 행**을 찾습니다:
-   - **`Name` 컬럼**이 정확히 **`sessionid`**
-   - **`Domain` 컬럼**이 정확히 **`.kidsnote.com`** (앞에 점)
-7. 그 행의 **`Value` 컬럼**을 클릭 → 셀이 선택됨
-8. **값을 복사**:
-   - **방법 A** (셀이 다 보이면): 더블클릭 → `Ctrl+C`
-   - **방법 B** (셀이 잘려 보이면 / 일반적): 행을 클릭 → 표 **하단**에 나타나는 패널의 **`Cookie Value`** 영역에서 값을 마우스로 드래그 선택 → `Ctrl+C`
-
-![Chrome 개발자 도구에서 sessionid 쿠키 위치](images/chrome-cookie-sessionid.png)
-
-쿠키 값 예시: `ycen2ydnwm2vsoj3zxe618k5nugt7j33` (영문 소문자 + 숫자 32자 정도)
-
-⚠️ 메모장에 붙여두세요.
-
-### 🚫 헷갈리지 마세요 — 절대 복사하면 안 되는 쿠키들
-
-쿠키 표를 보면 `sessionid`처럼 보이는 이름이 여럿 있을 거예요. 다음은 **전부 다른 용도**이므로 무시하세요:
-
-| 쿠키 이름 | 정체 |
+| 값 | 설명 |
 |---|---|
-| `_kau`, `_kawlt`, `_kdt`, `_karb`, `_kasl` 등 `_k*` | Domain이 `.kakao.com` — 카카오 로그인/광고용 |
-| `ch-session-127152`, `ch-veil-id` | 채널톡(홈페이지 우측 하단 챗봇) 세션 |
-| `current_user` | 사용자 ID 표시용 (값이 짧음, sessionid 아님) |
-| `_kn_visitorId`, `_gcl_au`, `_ga*`, `_dd_s` | 방문자 통계용 |
+| 키즈노트 아이디 | https://www.kidsnote.com 로그인 화면의 아이디 |
+| 키즈노트 비밀번호 | 같은 계정의 비밀번호 |
 
-**정답은 단 하나**: `Name` 정확히 **`sessionid`** + `Domain` 정확히 **`.kidsnote.com`**.
+이 값은 다음 단계에서 GitHub Secrets에 직접 입력합니다. README, 코드, 이슈, 실행 로그에는 적지 마세요.
 
-✅ **6단계 성공 신호**: 메모장에 32자 정도의 영문+숫자 문자열.
-
-### ❓ 막혔다면
-
-| 증상 | 원인 / 해결 |
-|---|---|
-| `sessionid` 행이 없음 | 키즈노트 로그아웃 상태. 로그인 다시 확인 |
-| `Application` 탭이 없음 | 개발자 도구 창이 너무 좁음. 창 크기 늘리거나 `>>` 더보기에서 선택 |
-| 쿠키 값이 너무 길어서 셀이 잘림 | 하단 `Cookie Value` 패널에서 드래그 선택 (위의 방법 B) |
-| F12 / Ctrl+Shift+I 모두 안 먹음 | 시크릿 모드일 가능성. 일반 창에서 다시 시도 |
-
-> 💡 **쿠키 만료 안내**: 이 sessionid는 약 **30일 후 만료**됩니다. 만료되면 이 6단계만 다시 + GitHub Secrets 업데이트하면 됩니다 (3분).
+> 현재 자동 로그인은 키즈노트의 아이디·비밀번호 입력 폼을 사용합니다. 로그인 과정에서 2단계 인증이나 추가 확인 화면이 나타나는 계정은 자동 실행이 중단되고 원인을 로그에 남깁니다.
 
 ---
 
@@ -618,9 +564,9 @@ https://www.notion.so/키즈노트백업-238f5e29c0894adfb6c4d8e1a5b2c3d4?v=...
 
 > 🕐 **약 3분**
 >
-> 📍 **시작 전 확인**: 메모장에 세 값(노션 토큰, DB ID, 쿠키)이 있고, GitHub fork 페이지를 찾을 수 있음 (1단계 URL)
+> 📍 **시작 전 확인**: 노션 토큰, DB ID, 키즈노트 아이디·비밀번호가 준비되어 있고 GitHub fork 페이지를 찾을 수 있음
 
-이제 메모장에 모은 세 값을 GitHub fork에 안전하게 저장합니다. GitHub Secrets는 암호화되어 저장되며, 워크플로 실행 시에만 사용됩니다.
+이제 준비한 네 값을 GitHub fork에 저장합니다. GitHub Secrets는 워크플로 실행 시에만 주입되며 값은 목록이나 로그에 표시되지 않습니다.
 
 ### 7-1. 내 fork 페이지 → Settings로 이동
 
@@ -635,15 +581,16 @@ https://www.notion.so/키즈노트백업-238f5e29c0894adfb6c4d8e1a5b2c3d4?v=...
 3. 좌측 사이드바에서 **`Secrets and variables`** 클릭 (펼쳐짐) → **`Actions`** 하위 클릭
 4. 페이지 우측 상단 **녹색 `New repository secret` 버튼** 클릭
 
-### 7-3. 필수 시크릿 3개 등록
+### 7-3. 필수 시크릿 4개 등록
 
-다음 표대로 **3번 반복**해서 등록합니다 — 한 번에 하나씩.
+다음 표대로 **4번 반복**해서 등록합니다 — 한 번에 하나씩.
 
 | Name (정확히 일치, 대소문자 구분) | Secret 값 |
 |---|---|
 | `NOTION_TOKEN` | 3단계에서 받은 토큰 (`ntn_...` 또는 `secret_...`) |
 | `NOTION_DATABASE_ID` | 5단계에서 추출한 32자 hex |
-| `KIDSNOTE_SESSION_COOKIE` | 6단계에서 복사한 쿠키 값 |
+| `KIDSNOTE_USERNAME` | 6단계에서 확인한 키즈노트 아이디 |
+| `KIDSNOTE_PASSWORD` | 6단계에서 확인한 키즈노트 비밀번호 |
 
 **한 시크릿씩 등록하는 방법**:
 1. `New repository secret` 버튼 클릭
@@ -656,9 +603,10 @@ https://www.notion.so/키즈노트백업-238f5e29c0894adfb6c4d8e1a5b2c3d4?v=...
 
 > ⚠️ 값 복사 시 **앞뒤 공백/줄바꿈 포함 안 되게** 주의. 메모장 → GitHub 붙여넣기 시 클릭만 하고 `Ctrl+V`.
 
-✅ **7단계 성공 신호**: Secrets 목록에 다음 3개가 정확한 이름으로 나열됨:
+✅ **7단계 성공 신호**: Secrets 목록에 다음 4개가 정확한 이름으로 나열됨:
 ```
-KIDSNOTE_SESSION_COOKIE       Updated now
+KIDSNOTE_PASSWORD             Updated now
+KIDSNOTE_USERNAME             Updated now
 NOTION_DATABASE_ID            Updated now
 NOTION_TOKEN                  Updated now
 ```
@@ -749,7 +697,7 @@ python3 tools/kidsnote_fetch/drive_oauth_setup.py ~/Downloads/client_secret_....
 
 > 🕐 **백업 자체는 5분 ~ 4시간** (알림장 개수에 따라)
 >
-> 📍 **시작 전 확인**: 필수 시크릿 3개 등록 완료 + 노션 DB에 통합 연결 완료
+> 📍 **시작 전 확인**: 필수 시크릿 4개 등록 완료 + 노션 DB에 통합 연결 완료
 
 드디어 마지막 단계. 워크플로를 직접 한 번 돌려서 백업을 시작합니다.
 
@@ -917,7 +865,7 @@ GitHub Actions는 종종 네트워크 이슈로 중간에 멈출 수 있어요. 
 
 ✅ **이제 끝**: 셋업 끝났습니다. 이 시점부터는 **사용자가 할 일이 없어요**.
 - 매 4시간 cron 자동 트리거 → 새 알림장 있으면 자동 백업
-- 30일에 한 번 쿠키 갱신 (3분)만 잊지 마세요
+- 매 실행마다 GitHub Chromium이 새 로그인 세션을 자동 발급
 
 ### ❓ 막혔다면
 
@@ -1003,7 +951,7 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 - 새 알림장이 없으면 1~2분 만에 immediately exit
 - 새 알림장 있으면 처리 + LLM 대시보드 갱신
 
-**즉, 두 번째 이후 사용자가 할 일은 없습니다.** 단, 30일에 한 번 키즈노트 sessionid 쿠키가 만료되어 갱신이 필요할 때만 아래 ([쿠키 만료 시](#쿠키-만료-시-약-30일마다))를 참고하세요.
+**즉, 두 번째 이후 사용자가 할 일은 없습니다.** 기존 세션 만료와 무관하게 매 실행마다 새 로그인 세션을 발급받습니다.
 
 ### 매일 검증 안 해도 되나요?
 
@@ -1017,7 +965,7 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 |------|----------|
 | 매일 | **아무것도 안 해도 됨** — 노션 평소처럼 보면 새 글이 쌓여 있음 |
 | 첫 주 정도 | 평일에 노션에 새 글이 들어오는지 1회 가볍게 확인 (안심용) |
-| 약 30일 후 | GitHub에서 ❌ 메일이 오면 쿠키 갱신 3분 |
+| 키즈노트 비밀번호 변경 후 | GitHub의 `KIDSNOTE_PASSWORD` Secret도 새 비밀번호로 갱신 |
 
 **수동 trigger가 필요한 경우** (드물게):
 1. fork repo URL 접속 (북마크 권장: `https://github.com/내깃허브아이디/kidsnote-backup`)
@@ -1025,15 +973,9 @@ URL 공개 대신 **노션 게스트 초대**가 안전합니다:
 3. 우측 **`Run workflow ▾`** → `limit` 비워둠 → 녹색 **`Run workflow`** 버튼
 4. 5분 정도 기다림 (새 알림장만 처리)
 
-### 쿠키 만료 시 (약 30일마다)
+### 키즈노트 로그인이 실패할 때
 
-워크플로 실행했는데 빨간색 ❌ + 에러(`401` 또는 `Notion DB query failed: ...`)가 나오면, 쿠키가 만료됐다는 신호입니다.
-
-해결법 (3분):
-1. **6단계** 다시 실행 (Chrome에서 새 sessionid 추출)
-2. fork repo → **`Settings`** → **`Secrets and variables`** → **`Actions`**
-3. `KIDSNOTE_SESSION_COOKIE` 옆 연필 아이콘 클릭 → **`Update secret`** → 새 값 붙여넣기 → **`Update`**
-4. **`Actions`** 탭 → 다시 워크플로 실행
+`Kidsnote browser auth probe failed`가 나오면 `KIDSNOTE_USERNAME`과 `KIDSNOTE_PASSWORD`가 현재 웹 로그인 정보와 일치하는지 확인하세요. 비밀번호를 변경했다면 GitHub Secret도 함께 갱신해야 합니다. 추가 인증 화면이 나타나는 경우에는 자동 로그인 지원을 다시 점검해야 합니다.
 
 ---
 
@@ -1132,7 +1074,7 @@ Drive fallback이 켜져 있으면 대신 `uploaded ... to Google Drive fallback
 
 ### 카카오 SSO(카카오 로그인) 계정도 되나요?
 
-네, 됩니다. 쿠키 기반이라 카카오 SSO든 일반 계정이든 차이가 없습니다. Chrome에서 평소처럼 로그인만 되면 OK.
+GitHub 자동 로그인은 키즈노트 아이디·비밀번호 입력 폼을 사용합니다. 소셜 로그인만 가능하고 키즈노트 비밀번호가 없는 계정은 현재 자동 로그인 대상이 아닙니다.
 
 ### 매번 수동으로 실행해야 하나요?
 
@@ -1142,20 +1084,19 @@ Drive fallback이 켜져 있으면 대신 `uploaded ... to Google Drive fallback
 - 새 알림장이 있으면 백업 + LLM 대시보드 갱신
 - 없으면 1~2분 만에 immediately exit (할 일 없으면 빠르게 종료)
 
-**유일하게 손이 가는 일**: 30일에 한 번 키즈노트 sessionid 쿠키 갱신 (브라우저에서 새 값 추출 후 GitHub Secrets `Update`). 약 3분.
+키즈노트 비밀번호를 변경하지 않는 한 세션 쿠키를 수동으로 갱신할 일은 없습니다.
 
 > 💡 cron 자동 트리거를 끄고 수동으로만 돌리고 싶으면: Actions 탭 → 워크플로 → `⋯` → `Disable workflow`.
 
 ### 노션에 새 알림장이 안 들어와요 (며칠째 멈춤)
 
-가장 흔한 원인은 **키즈노트 sessionid 쿠키 만료**(약 30일마다). 확인 + 해결:
+먼저 GitHub의 브라우저 로그인 단계를 확인하세요:
 
 1. **GitHub 메일 확인** — 가입 이메일에 `Run failed` 알림이 와 있는지
 2. **Actions 탭 확인** — fork repo → `Actions` 탭 → 최근 run이 **빨간색 ❌**인지
-3. 실패한 run 클릭 → 로그에 다음 중 하나가 보이면 쿠키 문제:
-   - `401 Unauthorized` (키즈노트)
-   - `KIDSNOTE_SESSION_COOKIE missing or expired`
-4. 해결 = [쿠키 만료 시](#쿠키-만료-시-약-30일마다) 섹션 절차 (3분)
+3. `Authenticate Kidsnote in browser` 단계의 오류 확인
+4. `missing GitHub secret`이면 7단계의 Secret 이름 확인
+5. `login was not accepted`이면 키즈노트 아이디·비밀번호 확인
 
 쿠키 문제가 아닌데도 안 들어오면:
 - 오늘 어린이집 휴무일이라 새 글이 없을 수도 있음
@@ -1188,8 +1129,9 @@ UI는 노션이 가끔 바뀝니다. 메뉴 이름이 달라도 다음 기능을
 
 | 에러 메시지 | 원인 | 해결 |
 |---|---|---|
-| `KIDSNOTE_SESSION_COOKIE missing` 또는 `NOTION_TOKEN missing` | 시크릿 이름 오타 또는 누락 | 7단계 시크릿 이름 정확히 (대문자+언더바) |
-| `401 Unauthorized` 키즈노트 에러 | sessionid 만료 (약 30일) | 6단계 다시 + Secrets `Update secret` |
+| `KIDSNOTE_USERNAME`, `KIDSNOTE_PASSWORD` 또는 `NOTION_TOKEN` missing | 시크릿 이름 오타 또는 누락 | 7단계 시크릿 이름 정확히 확인 |
+| `Kidsnote browser auth probe failed` | 로그인 정보 불일치, 추가 인증 또는 로그인 화면 변경 | 키즈노트 웹 로그인 확인 후 관련 Secret 갱신 |
+| `401 Unauthorized` 키즈노트 에러 | 새 브라우저 세션 전달 또는 Kidsnote 로그인 상태 검증 실패 | `Authenticate Kidsnote in browser`와 `AUTH_HANDOFF` 로그 확인 |
 | `Notion DB query failed: 'latin-1' codec...` | 토큰 값에 보이지 않는 BOM 문자 끼임 | 토큰 시크릿 다시 등록. 메모장 → GitHub `Update`에서 깔끔하게 붙여넣기 |
 | `Notion DB not found` / `404` | DB ID 틀림 또는 4단계 통합 연결 누락 | 5단계 DB ID 다시 확인 + 4단계 연결 확인 |
 | `Database not connected to integration` | 4단계 빠뜨림 | 4단계 진행 |

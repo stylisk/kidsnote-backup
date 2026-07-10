@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Verify that a GitHub-hosted browser can log in to Kidsnote.
+"""Log in to Kidsnote from a GitHub-hosted browser and verify the session.
 
-This probe intentionally does not print or persist credentials, cookies, child
-names, page contents, screenshots, traces, or browser storage.
+This helper never prints credentials or cookie values. It can hand the verified
+session to later steps through GitHub's temporary per-job environment file.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 
@@ -62,12 +64,25 @@ def child_count(payload: Any) -> int:
     return len(children)
 
 
+def write_github_env(path: str | os.PathLike[str], sessionid: str) -> None:
+    if not sessionid:
+        raise AuthProbeError("cannot export an empty Kidsnote sessionid")
+    if "\n" in sessionid or "\r" in sessionid:
+        raise AuthProbeError("Kidsnote sessionid contains an invalid newline")
+    with Path(path).open("a", encoding="utf-8") as env_file:
+        env_file.write(f"KIDSNOTE_SESSION_COOKIE={sessionid}\n")
+
+
 def _visible(page: Any, selector: str) -> bool:
     locator = page.locator(selector)
     return bool(locator.count() and locator.first.is_visible())
 
 
-def run_probe(env: Mapping[str, str] | None = None) -> int:
+def run_probe(
+    env: Mapping[str, str] | None = None,
+    *,
+    github_env: str | os.PathLike[str] | None = None,
+) -> int:
     username, password = required_credentials(env or os.environ)
 
     try:
@@ -156,6 +171,14 @@ def run_probe(env: Mapping[str, str] | None = None) -> int:
                 except ValueError as exc:
                     raise AuthProbeError("children API returned invalid JSON") from exc
 
+                if github_env:
+                    sessionid = str(session_cookie.get("value") or "")
+                    if not sessionid or "\n" in sessionid or "\r" in sessionid:
+                        raise AuthProbeError("Kidsnote returned an invalid sessionid")
+                    print(f"::add-mask::{sessionid}")
+                    write_github_env(github_env, sessionid)
+                    print("AUTH_PROBE handoff=GITHUB_ENV")
+
                 print(f"AUTH_PROBE result=PASS children_count={count}")
                 return 0
             finally:
@@ -166,8 +189,14 @@ def run_probe(env: Mapping[str, str] | None = None) -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--github-env",
+        help="Append the verified sessionid to this GitHub Actions environment file",
+    )
+    args = parser.parse_args()
     try:
-        return run_probe()
+        return run_probe(github_env=args.github_env)
     except AuthProbeError as exc:
         print(f"::error::Kidsnote browser auth probe failed: {exc}", file=sys.stderr)
         return 1
