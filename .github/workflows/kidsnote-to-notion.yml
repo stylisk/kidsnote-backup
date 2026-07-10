@@ -52,6 +52,12 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      auth_probe_only:
+        description: "Test Kidsnote browser login only; no Ollama, Notion, or backup writes"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
       title_source_chars:
         description: "Title QA source characters per body/comment; 0 hides source text"
         required: false
@@ -119,8 +125,9 @@ jobs:
           echo "ollama cache key: ${OLLAMA_CACHE_KEY}"
           echo "title quality only: ${{ inputs.title_quality_only || 'false' }}"
           echo "refresh report titles only: ${{ inputs.refresh_report_titles_only || 'false' }}"
+          echo "auth probe only: ${{ inputs.auth_probe_only || 'false' }}"
           echo "llm mode: ${{ inputs.llm_mode || 'auto' }}"
-          echo "use ollama: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}"
+          echo "use ollama: ${{ inputs.auth_probe_only != 'true' && (github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true')) }}"
           echo "requirements:"
           nl -ba tools/kidsnote_fetch/requirements.txt
 
@@ -136,17 +143,34 @@ jobs:
             echo "::error::refresh_report_titles_only cannot be combined with title_quality_only"
             exit 1
           fi
+          if [ "${{ inputs.auth_probe_only || 'false' }}" = "true" ] && { [ "${{ inputs.force_refresh || 'false' }}" = "true" ] || [ "${{ inputs.title_quality_only || 'false' }}" = "true" ] || [ "${{ inputs.refresh_report_titles_only || 'false' }}" = "true" ]; }; then
+            echo "::error::auth_probe_only cannot be combined with a Notion/title mutation mode"
+            exit 1
+          fi
           if grep -Eiq '^[[:space:]]*(pillow|piexif)([[:space:]<>=!~]|$)' tools/kidsnote_fetch/requirements.txt; then
             echo "::error::pillow/piexif must stay out of requirements.txt; media must be preserved without EXIF stripping or compression"
             exit 1
           fi
+
+      - name: Install Playwright Chromium for auth probe
+        if: ${{ inputs.auth_probe_only == 'true' }}
+        run: |
+          pip install -r tools/kidsnote_fetch/requirements-browser-auth.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Probe Kidsnote browser login
+        if: ${{ inputs.auth_probe_only == 'true' }}
+        env:
+          KIDSNOTE_USERNAME: ${{ secrets.KIDSNOTE_USERNAME }}
+          KIDSNOTE_PASSWORD: ${{ secrets.KIDSNOTE_PASSWORD }}
+        run: python tools/kidsnote_fetch/browser_auth_probe.py
 
       # ---- Ollama for speaker-aware report titles + LLM dashboards ----
       # Local LLM runs inside the runner — no API key / cost.
       # gemma4:12b-it-qat is pinned by the preflight guard above so prompt behavior
       # and cache identity drift loudly instead of silently changing output.
       - name: Cache Ollama models
-        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+        if: ${{ inputs.auth_probe_only != 'true' && (github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true')) }}
         id: ollama-cache
         uses: actions/cache@v4
         with:
@@ -154,7 +178,7 @@ jobs:
           key: ${{ env.OLLAMA_CACHE_KEY }}
 
       - name: Install Ollama + pull model
-        if: ${{ github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true') }}
+        if: ${{ inputs.auth_probe_only != 'true' && (github.event_name == 'schedule' || inputs.title_quality_only == 'true' || inputs.refresh_report_titles_only == 'true' || inputs.llm_mode == 'gemma' || (inputs.llm_mode == 'auto' && inputs.limit == '' && inputs.monthly_sample != 'true')) }}
         run: |
           if ! command -v ollama >/dev/null 2>&1; then
             curl -fsSL https://ollama.com/install.sh | sh
@@ -221,12 +245,13 @@ jobs:
           PY
 
       - name: Skip Ollama for fast fallback test
-        if: ${{ github.event_name != 'schedule' && inputs.title_quality_only != 'true' && inputs.refresh_report_titles_only != 'true' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
+        if: ${{ inputs.auth_probe_only != 'true' && github.event_name != 'schedule' && inputs.title_quality_only != 'true' && inputs.refresh_report_titles_only != 'true' && inputs.llm_mode != 'gemma' && (inputs.llm_mode != 'auto' || inputs.limit != '' || inputs.monthly_sample == 'true') }}
         run: |
           echo "Skipping Ollama/Gemma setup for fast workflow test."
           echo "Report titles will use source-text fallback; LLM dashboards are skipped in this mode."
 
       - name: Mirror Kidsnote → Notion
+        if: ${{ inputs.auth_probe_only != 'true' }}
         env:
           KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
@@ -267,7 +292,7 @@ jobs:
           python tools/kidsnote_fetch/fetch.py "${ARGS[@]}"
 
       - name: Verify required secrets were present
-        if: failure()
+        if: ${{ failure() && inputs.auth_probe_only != 'true' }}
         env:
           KIDSNOTE_SESSION_COOKIE: ${{ secrets.KIDSNOTE_SESSION_COOKIE }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
